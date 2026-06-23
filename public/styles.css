@@ -342,9 +342,6 @@ td {
 }
 
 th {
-  position: sticky;
-  top: 83px;
-  z-index: 2;
   background: #f5f4ed;
   color: var(--muted);
   font-weight: 700;

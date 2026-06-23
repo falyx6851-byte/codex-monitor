@@ -9,6 +9,16 @@
     "Cached input and reasoning tokens are token subcategories. Reasoning tokens are included in output tokens and are not added again."
   ],
   "models": {
+    "gpt-5.5": {
+      "input": 5,
+      "cached_input": 0.5,
+      "output": 30
+    },
+    "gpt-5.5-pro": {
+      "input": 30,
+      "cached_input": 30,
+      "output": 180
+    },
     "gpt-5.3-codex": {
       "input": 3.5,
       "cached_input": 0.35,

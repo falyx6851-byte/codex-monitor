@@ -27,6 +27,7 @@
 - `public/styles.css`：看板样式。
 - `public/app.js`：前端渲染、过滤、图表和导出逻辑。
 - `pricing.json`：API token 价格配置。只对配置了官方 API 单价的模型估算美元成本。
+- `docs/data-source-audit.md`：数据源、字段类型、官方语义和统计口径审计，是后续修正看板指标的依据。
 - `scripts/start.ps1`：前台启动。
 - `scripts/start-hidden.ps1`：后台隐藏启动。
 - `scripts/stop.ps1`：停止本地服务。
@@ -40,11 +41,12 @@
 ## 当前结论
 
 - 已实现本地 Web 看板。
-- JSONL 统计口径：每个 session 文件取最后一次 `total_token_usage`，避免重复累计同一会话内多次 `token_count`。
-- 请求统计口径：从 `logs_2.sqlite` 的原始 SSE `response.completed` 和 `codex.sse_event` 合并生成请求记录。
+- 主统计口径：以窗口内 completed 请求聚合 token，不再把 session 累计当作“今日 / 本周”消耗。
+- JSONL 统计口径：每个 session 文件取最后一次 `total_token_usage`，仅用于会话累计诊断，避免重复累计同一会话内多次 `token_count`。
+- 请求统计口径：从 `logs_2.sqlite` 的原始 SSE `response.completed` 和 `codex.sse_event` 去重合并生成请求记录。
 - 额度百分比：优先读取 `token_count.rate_limits.primary/secondary.used_percent`，这是本地日志字段，不需要 OAuth 反代。
 - IP：当前本地日志没有上游出口 IP 字段，因此看板明确显示“未记录”。
-- 首 token：按 `response.created` 到首个 `output_text.delta` / `function_call_arguments.delta` 的日志时间估算，非服务端精确 TTFT。
+- 首 token：仅在 raw SSE 能明确归因到单一 active response 时估算，非服务端精确 TTFT。
 - 花费：API key 请求可按 `pricing.json` 估算；ChatGPT OAuth 请求只显示 API 等价估算，不等于真实套餐账单。
 - 当前服务已后台运行：`http://127.0.0.1:4127`
 - 当前用户登录自启任务已安装：`CodexTokenMonitor`
@@ -56,7 +58,7 @@
 - PowerShell 脚本 Parser 语法检查：通过。
 - `/api/health`：返回 `ok: true`，`sessions_dir_exists: true`，`log_db_exists: true`，`sqlite_available: true`。
 - `/api/data`：可返回 session 汇总、请求记录、额度百分比和趋势数据。
-- Browser 桌面视口：指标卡、额度条、趋势图、请求表、会话表均正常渲染。
+- Browser 桌面视口：指标卡、额度条、趋势图、请求表、会话表均正常渲染；首屏指标已改为请求级窗口口径。
 - Browser 移动视口 `390x844`：无横向溢出，指标和表格数据正常。
 - 计划任务：`schtasks /Query /TN CodexTokenMonitor /V /FO LIST` 显示 `Status: Ready`。
 

@@ -72,6 +72,11 @@ function rowMs(row) {
   return Number(row.ts) * 1000 + Math.floor(Number(row.ts_nanos || 0) / 1_000_000);
 }
 
+function finiteNumber(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function clip(value, max = MAX_TEXT) {
   if (value == null) return '';
   const text = String(value).replace(/\s+/g, ' ').trim();
@@ -237,6 +242,7 @@ function parseSessionLogs() {
         if (ms > session.end_ms) session.end_ms = ms;
       }
       const payload = row.payload || {};
+      const eventTs = ms ?? session.end_ms ?? stat.mtimeMs;
       if (row.type === 'session_meta') {
         Object.assign(session, {
           id: payload.id || session.id,
@@ -264,11 +270,13 @@ function parseSessionLogs() {
           lastUsage = normalizeUsage(payload.info?.last_token_usage);
           if (payload.rate_limits) {
             session.last_rate_limits = payload.rate_limits;
-            latestRateLimit = {
-              ts: ms || session.end_ms,
-              session_id: session.id,
-              rate_limits: payload.rate_limits
-            };
+            if (!latestRateLimit || eventTs > latestRateLimit.ts) {
+              latestRateLimit = {
+                ts: eventTs,
+                session_id: session.id,
+                rate_limits: payload.rate_limits
+              };
+            }
           }
         }
         if (payload.type === 'user_message' || payload.type === 'agent_message') {
@@ -286,8 +294,8 @@ function parseSessionLogs() {
     if (lastTotal && lastTotal.total_tokens > 0) session.usage = lastTotal;
     else if (lastUsage && lastUsage.total_tokens > 0) session.usage = lastUsage;
     session.start_ms = session.start_ms || stat.birthtimeMs || stat.mtimeMs;
-    session.messages = session.messages.slice(-8);
     allMessages.set(session.id, session.messages);
+    session.messages = session.messages.slice(-8);
     sessions.push(session);
   }
 
@@ -335,7 +343,6 @@ function parseRawSseRequests(startMs, endMs) {
   );
 
   const active = new Map();
-  let activeId = null;
   const requests = [];
 
   for (const row of rows) {
@@ -359,7 +366,6 @@ function parseRawSseRequests(startMs, endMs) {
         model: event.response?.model || '',
         sequence_start: event.sequence_number ?? null
       });
-      activeId = id;
       continue;
     }
 
@@ -369,7 +375,7 @@ function parseRawSseRequests(startMs, endMs) {
       event.type === 'response.content_part.added' ||
       event.type === 'response.output_item.added'
     ) {
-      const record = active.get(activeId);
+      const record = active.size === 1 ? active.values().next().value : null;
       if (record) {
         if (record.first_signal_ms == null) record.first_signal_ms = Math.max(0, nowMs - record.created_log_ms);
         if (
@@ -384,8 +390,10 @@ function parseRawSseRequests(startMs, endMs) {
 
     if (event.type === 'response.completed') {
       const response = event.response || {};
-      const id = response.id || activeId || `completed-${row.id}`;
-      const record = active.get(id) || active.get(activeId) || {};
+      const id = response.id || `completed-${row.id}`;
+      const soleActive = active.size === 1 ? active.values().next().value : null;
+      const matchedActiveId = active.has(id) ? id : soleActive?.response_id;
+      const record = active.get(id) || soleActive || {};
       const usage = normalizeUsage(response.usage || {});
       const createdMs = Number(response.created_at || 0) > 0 ? Number(response.created_at) * 1000 : record.created_ms || nowMs;
       const completedMs = Number(response.completed_at || 0) > 0 ? Number(response.completed_at) * 1000 : nowMs;
@@ -410,8 +418,7 @@ function parseRawSseRequests(startMs, endMs) {
           merge_quality: 'raw_sse'
         });
       }
-      active.delete(id);
-      if (activeId === id) activeId = null;
+      if (matchedActiveId) active.delete(matchedActiveId);
     }
   }
   return requests;
@@ -431,8 +438,18 @@ function parseOtelCompletions(startMs, endMs) {
     [startSec, endSec]
   );
   const byKey = new Map();
+  const durationByBaseKey = new Map();
   for (const row of rows) {
     const item = parseKvLog(row.body || '');
+    const ms = timestampMs(item['event.timestamp']) || rowMs(row);
+    if (ms < startMs || ms > endMs) continue;
+    const baseKey = [
+      item['conversation.id'] || '',
+      item['event.timestamp'] || '',
+      item.model || ''
+    ].join('|');
+    const durationMs = finiteNumber(item.duration_ms);
+    if (durationMs != null) durationByBaseKey.set(baseKey, durationMs);
     if (!item.input_token_count) continue;
     const usage = normalizeUsage({
       input_tokens: item.input_token_count,
@@ -441,12 +458,8 @@ function parseOtelCompletions(startMs, endMs) {
       reasoning_output_tokens: item.reasoning_token_count,
       total_tokens: item.tool_token_count
     });
-    const ms = timestampMs(item['event.timestamp']) || rowMs(row);
-    if (ms < startMs || ms > endMs) continue;
     const key = [
-      item['conversation.id'] || '',
-      item['event.timestamp'] || '',
-      item.model || '',
+      baseKey,
       usage.input_tokens,
       usage.cached_input_tokens,
       usage.output_tokens
@@ -456,6 +469,8 @@ function parseOtelCompletions(startMs, endMs) {
       byKey.set(key, {
         id: `otel-${row.id}`,
         completed_ms: ms,
+        base_key: baseKey,
+        duration_ms: durationMs,
         model: item.model || '',
         slug: item.slug || '',
         usage,
@@ -463,10 +478,15 @@ function parseOtelCompletions(startMs, endMs) {
         auth_mode: item.auth_mode || null,
         originator: item.originator || null,
         app_version: item['app.version'] || null,
+        terminal_type: item['terminal.type'] || null,
         source_ip: null,
         merge_quality: 'otel'
       });
     }
+  }
+  for (const item of byKey.values()) {
+    if (item.duration_ms == null) item.duration_ms = durationByBaseKey.get(item.base_key) ?? null;
+    delete item.base_key;
   }
   return [...byKey.values()];
 }
@@ -497,10 +517,12 @@ function mergeRequestMetadata(rawRequests, otelRequests) {
       used.add(best.index);
       return {
         ...req,
+        duration_ms: best.data.duration_ms ?? req.duration_ms,
         conversation_id: best.data.conversation_id,
         auth_mode: best.data.auth_mode,
         originator: best.data.originator,
         app_version: best.data.app_version,
+        terminal_type: best.data.terminal_type,
         merge_quality: 'raw_sse+otel'
       };
     }
@@ -515,7 +537,7 @@ function mergeRequestMetadata(rawRequests, otelRequests) {
       response_id: null,
       created_ms: null,
       completed_ms: o.completed_ms,
-      duration_ms: null,
+      duration_ms: o.duration_ms ?? null,
       first_token_ms_estimate: null,
       first_signal_ms_estimate: null,
       model: o.model,
@@ -526,6 +548,7 @@ function mergeRequestMetadata(rawRequests, otelRequests) {
       auth_mode: o.auth_mode,
       originator: o.originator,
       app_version: o.app_version,
+      terminal_type: o.terminal_type,
       source_ip: null,
       merge_quality: 'otel_only'
     });
@@ -632,7 +655,7 @@ function buildData(startMs, endMs, bucket, limit) {
     }
     Object.assign(req, findNearestMessages(sessionData.allMessages, req.conversation_id, req.created_ms, req.completed_ms));
     if (!req.output_preview) req.output_preview = req.output_preview_from_session || '';
-    req.source_label = [req.auth_mode, req.originator, req.session_source].filter(Boolean).join(' / ') || 'unknown';
+    req.source_label = [req.auth_mode, req.originator, req.terminal_type, req.session_source].filter(Boolean).join(' / ') || 'unknown';
     req.cost = estimateCost(req.model, req.usage, req.auth_mode);
   }
 
@@ -685,6 +708,7 @@ function buildData(startMs, endMs, bucket, limit) {
       sessions: filteredSessions.length,
       sessions_without_token: filteredSessions.filter((s) => s.token_events === 0).length,
       requests: requests.length,
+      session_cumulative_usage: sessionUsage,
       session_usage: sessionUsage,
       request_usage: requestUsage,
       known_cost_usd: totalCost,
@@ -692,6 +716,17 @@ function buildData(startMs, endMs, bucket, limit) {
       average_latency_ms: durations.length ? durations.reduce((a, b) => a + b, 0) / durations.length : null,
       average_first_token_ms_estimate: firstTokens.length ? firstTokens.reduce((a, b) => a + b, 0) / firstTokens.length : null,
       source_ip_available: false
+    },
+    data_quality: {
+      primary_usage: 'request_completed_window',
+      request_usage_sources: {
+        raw_sse: requests.filter((r) => r.merge_quality === 'raw_sse').length,
+        raw_sse_plus_otel: requests.filter((r) => r.merge_quality === 'raw_sse+otel').length,
+        otel_only: requests.filter((r) => r.merge_quality === 'otel_only').length
+      },
+      session_usage: 'session_cumulative_diagnostic_only',
+      first_token_ms: 'raw_sse_log_estimate_when_single_active_response',
+      source_ip: 'unavailable'
     },
     buckets: {
       sessions: summarizeByBuckets(filteredSessions, bucket),
@@ -743,7 +778,7 @@ function contentType(file) {
 function sendStatic(res, pathname) {
   const safePath = pathname === '/' ? '/index.html' : pathname;
   const file = path.resolve(PUBLIC_DIR, '.' + safePath);
-  if (!file.startsWith(PUBLIC_DIR)) {
+  if (file !== PUBLIC_DIR && !file.startsWith(PUBLIC_DIR + path.sep)) {
     res.writeHead(403);
     res.end('Forbidden');
     return;
@@ -762,7 +797,30 @@ function sendStatic(res, pathname) {
   });
 }
 
+function isAllowedLocalHost(value) {
+  if (!value) return false;
+  try {
+    const parsed = new URL(value.includes('://') ? value : `http://${value}`);
+    const host = parsed.hostname.toLowerCase();
+    const port = parsed.port || String(PORT);
+    return ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(host) && port === String(PORT);
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedRequest(req) {
+  if (!isAllowedLocalHost(req.headers.host || '')) return false;
+  const origin = req.headers.origin;
+  if (origin && !isAllowedLocalHost(origin)) return false;
+  return true;
+}
+
 const server = http.createServer((req, res) => {
+  if (!isAllowedRequest(req)) {
+    sendJson(res, 403, { error: 'forbidden_host' });
+    return;
+  }
   const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
   if (url.pathname === '/api/data') {
     const range = parseRange(url.searchParams);

@@ -156,15 +156,17 @@ function metric(label, value, sub, accent) {
 
 function renderMetrics(data) {
   const s = data.summary;
-  const usage = s.session_usage;
-  const reqUsage = s.request_usage;
+  const usage = s.request_usage;
+  const sessionUsage = s.session_cumulative_usage || s.session_usage;
+  const quality = data.data_quality?.request_usage_sources || {};
+  const rawCount = Number(quality.raw_sse_plus_otel || 0) + Number(quality.raw_sse || 0);
   els.metrics.innerHTML = [
-    metric('Session Token', fmtCompact(usage.total_tokens), `${fmtNum(data.summary.sessions)} 会话 / ${fmtNum(s.sessions_without_token)} 无 token`, 'accent-green'),
+    metric('窗口请求 Token', fmtCompact(usage.total_tokens), `${fmtNum(s.requests)} completed 请求`, 'accent-green'),
     metric('输入 Token', fmtCompact(usage.input_tokens), `缓存 ${fmtCompact(usage.cached_input_tokens)}`, 'accent-cyan'),
     metric('输出 Token', fmtCompact(usage.output_tokens), `Reasoning ${fmtCompact(usage.reasoning_output_tokens)}`, 'accent-violet'),
-    metric('请求记录', fmtNum(s.requests), `SSE token ${fmtCompact(reqUsage.total_tokens)}`, 'accent-amber'),
+    metric('请求来源', fmtNum(s.requests), `raw ${fmtNum(rawCount)} / otel ${fmtNum(quality.otel_only || 0)}`, 'accent-amber'),
     metric('平均耗时', fmtMs(s.average_latency_ms), `首 token ${fmtMs(s.average_first_token_ms_estimate)} 估`, 'accent-red'),
-    metric('估算花费', s.known_cost_requests ? `$${s.known_cost_usd.toFixed(2)}` : '未配置', `${s.known_cost_requests}/${s.requests} 请求有单价`, 'accent-green')
+    metric('估算花费', s.known_cost_requests ? `$${s.known_cost_usd.toFixed(2)}` : '未配置', `${s.known_cost_requests}/${s.requests} 请求有单价 / 会话累计 ${fmtCompact(sessionUsage.total_tokens)}`, 'accent-green')
   ].join('');
 }
 
@@ -198,6 +200,7 @@ function renderTrust(data) {
   const notes = [
     `JSONL：${fmtNum(d.session_files)} 个 session 文件，${fmtNum(d.token_events)} 个 token_count 事件。`,
     `SQLite：${d.sqlite_exists ? '可读' : '不存在'}，请求记录 ${fmtNum(d.request_records)} 条。`,
+    '主指标：按窗口内 completed 请求聚合；会话 token 是累计诊断，不作为窗口消耗。',
     '费用：API key 可按配置单价估算；ChatGPT OAuth 显示 API 等价估算，不等于账单。',
     'IP：本地 session/SSE 日志未记录上游出口 IP，本页不做抓包、反代或 OAuth token 读取。'
   ];
@@ -218,7 +221,7 @@ function drawTokenChart(data) {
   ctx.fillStyle = '#fffef8';
   ctx.fillRect(0, 0, w, h);
 
-  const rows = data.buckets.sessions || [];
+  const rows = data.buckets.requests || [];
   const padL = 48;
   const padR = 18;
   const padT = 20;
@@ -320,6 +323,7 @@ function renderRequests() {
       input_preview: r.input_preview,
       output_preview: r.output_preview,
       merge_quality: r.merge_quality,
+      terminal_type: r.terminal_type,
       source_ip: r.source_ip
     }, null, 2);
     const summary = clampText(r.input_preview || r.output_preview || r.response_id || '', 150);
@@ -423,4 +427,4 @@ function showError(error) {
 
 setDefaultRange(1);
 loadData().catch(showError);
-setInterval(() => loadData().catch(showError), 30_000);
+setInterval(() => loadData().catch(showError), 120_000);

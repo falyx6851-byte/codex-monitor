@@ -74,7 +74,7 @@
         <article class="panel wide">
           <div class="panel-head">
             <h2>Token 趋势</h2>
-            <span class="muted">按 session 最终累计值汇总</span>
+            <span class="muted">按 completed 请求汇总</span>
           </div>
           <canvas id="tokenChart" height="260"></canvas>
         </article>
@@ -116,7 +116,7 @@
 
       <section class="panel table-panel">
         <div class="panel-head">
-          <h2>会话汇总</h2>
+          <h2>会话诊断</h2>
           <span id="sessionCount" class="muted">0</span>
         </div>
         <div class="table-wrap">
@@ -127,7 +127,7 @@
                 <th>线程</th>
                 <th>来源</th>
                 <th>模型</th>
-                <th>总 token</th>
+                <th>累计 token</th>
                 <th>上下文</th>
                 <th>最近输入 / 输出</th>
               </tr>
