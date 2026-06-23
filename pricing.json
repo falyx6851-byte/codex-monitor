@@ -1,0 +1,38 @@
+{
+  "currency": "USD",
+  "unit": "per_1m_tokens",
+  "source": "https://platform.openai.com/docs/pricing",
+  "source_checked_at": "2026-06-23",
+  "notes": [
+    "Dollar estimates only apply to API-key usage and models with configured official API token prices.",
+    "ChatGPT OAuth usage is subscription or credit-limited; local logs expose rate-limit percentages, not invoice-grade dollar charges.",
+    "Cached input and reasoning tokens are token subcategories. Reasoning tokens are included in output tokens and are not added again."
+  ],
+  "models": {
+    "gpt-5.3-codex": {
+      "input": 3.5,
+      "cached_input": 0.35,
+      "output": 28
+    },
+    "gpt-5.2-codex": {
+      "input": 3.5,
+      "cached_input": 0.35,
+      "output": 28
+    },
+    "gpt-5.1-codex-max": {
+      "input": 2.5,
+      "cached_input": 0.25,
+      "output": 20
+    },
+    "gpt-5.1-codex": {
+      "input": 2.5,
+      "cached_input": 0.25,
+      "output": 20
+    },
+    "gpt-5-codex": {
+      "input": 2.5,
+      "cached_input": 0.25,
+      "output": 20
+    }
+  }
+}

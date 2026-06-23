@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Codex Token Monitor</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="mark">CTM</div>
+        <div>
+          <h1>Codex Token Monitor</h1>
+          <p id="statusLine">等待采集</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button id="refreshBtn" class="button primary" type="button" title="刷新数据">刷新</button>
+        <button id="exportBtn" class="button" type="button" title="导出当前 JSON">导出</button>
+      </div>
+    </header>
+
+    <section class="controls">
+      <div class="quick">
+        <button class="chip active" data-days="1" type="button">今日</button>
+        <button class="chip" data-days="7" type="button">7天</button>
+        <button class="chip" data-days="30" type="button">30天</button>
+        <button class="chip" data-days="0" type="button">全部</button>
+      </div>
+      <label>
+        <span>开始</span>
+        <input id="startInput" type="datetime-local">
+      </label>
+      <label>
+        <span>结束</span>
+        <input id="endInput" type="datetime-local">
+      </label>
+      <label>
+        <span>粒度</span>
+        <select id="bucketInput">
+          <option value="hour">小时</option>
+          <option value="day" selected>日</option>
+          <option value="week">周</option>
+        </select>
+      </label>
+      <label class="search">
+        <span>过滤</span>
+        <input id="searchInput" type="search" placeholder="model / source / cwd / text">
+      </label>
+    </section>
+
+    <main>
+      <section class="metric-grid" id="metricGrid"></section>
+
+      <section class="quota-grid">
+        <article class="panel quota-panel">
+          <div class="panel-head">
+            <h2>额度窗口</h2>
+            <span id="quotaStamp" class="muted">暂无</span>
+          </div>
+          <div id="quotaBars" class="quota-bars"></div>
+        </article>
+        <article class="panel note-panel">
+          <div class="panel-head">
+            <h2>数据可信度</h2>
+            <span class="muted">只读本机日志</span>
+          </div>
+          <ul id="trustList"></ul>
+        </article>
+      </section>
+
+      <section class="chart-grid">
+        <article class="panel wide">
+          <div class="panel-head">
+            <h2>Token 趋势</h2>
+            <span class="muted">按 session 最终累计值汇总</span>
+          </div>
+          <canvas id="tokenChart" height="260"></canvas>
+        </article>
+        <article class="panel">
+          <div class="panel-head">
+            <h2>模型分布</h2>
+            <span class="muted">按请求 token</span>
+          </div>
+          <div id="modelList" class="model-list"></div>
+        </article>
+      </section>
+
+      <section class="panel table-panel">
+        <div class="panel-head">
+          <h2>请求记录</h2>
+          <span id="requestCount" class="muted">0</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>模型</th>
+                <th>来源</th>
+                <th>输入</th>
+                <th>缓存</th>
+                <th>输出</th>
+                <th>首 token</th>
+                <th>耗时</th>
+                <th>花费</th>
+                <th>IP</th>
+                <th>摘要</th>
+              </tr>
+            </thead>
+            <tbody id="requestRows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel table-panel">
+        <div class="panel-head">
+          <h2>会话汇总</h2>
+          <span id="sessionCount" class="muted">0</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>更新时间</th>
+                <th>线程</th>
+                <th>来源</th>
+                <th>模型</th>
+                <th>总 token</th>
+                <th>上下文</th>
+                <th>最近输入 / 输出</th>
+              </tr>
+            </thead>
+            <tbody id="sessionRows"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="detailDialog">
+      <form method="dialog">
+        <button class="close" value="close" title="关闭">×</button>
+      </form>
+      <pre id="detailText"></pre>
+    </dialog>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

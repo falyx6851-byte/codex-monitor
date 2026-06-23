@@ -1,0 +1,12 @@
+{
+  "name": "codex-token-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local Codex token and request monitoring dashboard.",
+  "scripts": {
+    "start": "node --no-warnings server.js"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
