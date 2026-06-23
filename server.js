@@ -180,6 +180,55 @@ function extractResponseOutput(response) {
   return clip(parts.join('\n'), 1600);
 }
 
+function summarizeOutputItems(output) {
+  if (!Array.isArray(output)) return [];
+  return output.map((item) => ({
+    id: item?.id || null,
+    type: item?.type || null,
+    status: item?.status || null,
+    role: item?.role || null,
+    content_types: Array.isArray(item?.content)
+      ? item.content.map((content) => content?.type || null).filter(Boolean)
+      : [],
+    tool_name: item?.name || null,
+    call_id: item?.call_id || null
+  }));
+}
+
+function summarizeTools(tools) {
+  if (!Array.isArray(tools)) return [];
+  return tools.map((tool) => ({
+    type: tool?.type || null,
+    name: tool?.name || null
+  }));
+}
+
+function officialResponseSnapshot(response) {
+  return {
+    source: 'responses.response.completed',
+    object: response.object || null,
+    id: response.id || null,
+    status: response.status || null,
+    model: response.model || null,
+    created_at: response.created_at ?? null,
+    completed_at: response.completed_at ?? null,
+    service_tier: response.service_tier ?? null,
+    usage: response.usage || null,
+    tool_usage: response.tool_usage || null,
+    error: response.error || null,
+    incomplete_details: response.incomplete_details || null,
+    metadata: response.metadata || null,
+    reasoning: response.reasoning || null,
+    text: response.text || null,
+    truncation: response.truncation ?? null,
+    parallel_tool_calls: response.parallel_tool_calls ?? null,
+    prompt_cache_key: response.prompt_cache_key ?? null,
+    prompt_cache_retention: response.prompt_cache_retention ?? null,
+    output_items: summarizeOutputItems(response.output),
+    tools: summarizeTools(response.tools)
+  };
+}
+
 function parseSessionIdFromPath(file) {
   const name = path.basename(file, '.jsonl');
   const m = name.match(/rollout-[^-]+-[^-]+-(.+)$/);
@@ -409,6 +458,7 @@ function parseRawSseRequests(startMs, endMs) {
           model: response.model || record.model || '',
           status: response.status || '',
           usage,
+          official_response: officialResponseSnapshot(response),
           output_preview: extractResponseOutput(response),
           conversation_id: null,
           auth_mode: null,
@@ -543,6 +593,7 @@ function mergeRequestMetadata(rawRequests, otelRequests) {
       model: o.model,
       status: 'completed',
       usage: o.usage,
+      official_response: null,
       output_preview: '',
       conversation_id: o.conversation_id,
       auth_mode: o.auth_mode,

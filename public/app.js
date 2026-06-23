@@ -324,6 +324,7 @@ function renderRequests() {
       output_preview: r.output_preview,
       merge_quality: r.merge_quality,
       terminal_type: r.terminal_type,
+      official_response: r.official_response,
       source_ip: r.source_ip
     }, null, 2);
     const summary = clampText(r.input_preview || r.output_preview || r.response_id || '', 150);

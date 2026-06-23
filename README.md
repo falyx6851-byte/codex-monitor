@@ -28,6 +28,7 @@
 - `public/app.js`：前端渲染、过滤、图表和导出逻辑。
 - `pricing.json`：API token 价格配置。只对配置了官方 API 单价的模型估算美元成本。
 - `docs/data-source-audit.md`：数据源、字段类型、官方语义和统计口径审计，是后续修正看板指标的依据。
+- `docs/official-openai-usage.md`：OpenAI 官方 Responses usage、组织级 Usage API、Costs API 的字段样式和接入边界。
 - `scripts/start.ps1`：前台启动。
 - `scripts/start-hidden.ps1`：后台隐藏启动。
 - `scripts/stop.ps1`：停止本地服务。
