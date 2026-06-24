@@ -1,5 +1,7 @@
 # Codex Token Monitor
 
+[中文说明](README.zh-CN.md) | English
+
 Local Codex token and request monitoring dashboard.
 
 This project reads Codex session JSONL files from your local machine, normalizes token usage records into a local SQLite database, and serves a dashboard at `http://127.0.0.1:4127`.
