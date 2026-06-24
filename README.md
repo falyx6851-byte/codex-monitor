@@ -44,8 +44,8 @@ CODEX_HOME=/path/to/.codex npm start
 Clone the repository:
 
 ```bash
-git clone https://github.com/falyx6851-byte/codex-token-monitor.git
-cd codex-token-monitor
+git clone https://github.com/falyx6851-byte/codex-monitor.git
+cd codex-monitor
 ```
 
 Run the dashboard:

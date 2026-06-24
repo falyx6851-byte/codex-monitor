@@ -1,11 +1,11 @@
 {
-  "name": "codex-token-monitor",
+  "name": "codex-monitor",
   "version": "0.1.0",
   "description": "Local Codex token and request monitoring dashboard.",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/falyx6851-byte/codex-token-monitor.git"
+    "url": "https://github.com/falyx6851-byte/codex-monitor.git"
   },
   "keywords": [
     "codex",
