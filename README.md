@@ -56,11 +56,11 @@
 - Reasoning token：`reasoning_output_tokens`，是输出 token 子集，不额外加总。
 - 总 token：`last_token_usage.total_tokens`。
 - 响应时间戳：`token_count` 事件 timestamp。
-- 状态：`success` 表示 session 已记录该 token 事件；`failed` 来自 session `event_msg/error`，错误原因保存在 `error_reason`。
+- 状态：`success` 表示 session 已记录可解释的 token 事件；`failed` 来自 session `event_msg/error`，或 `last_token_usage` 只有总 token、缺少输入/输出明细的异常记录。错误原因保存在 `error_reason`，没有明确错误时只记录本地可见原因。
 - 实际模型：优先使用同 session 内最近的 `turn_context.model`。
 - 本地响应耗时估算：最近 user/tool/output 边界到 `token_count.timestamp`，字段为 `request_duration_ms_estimate`，不是官方服务端耗时；超过 10 分钟的陈旧边界会被排除。
 - 首输出估算：同一模型请求中第一个 `response_item` 减去最近 user/tool/output 边界，字段为 `first_output_ms_estimate`；这不是官方 TTFT。
-- 输出形态：前端只显示“流式 / 非流式”。当前本地判断依据是同一 `token_count` 前观察到的 `response_item_count`，`>1` 记为“流式”；这不是官方 `stream=true/false` 字段。
+- 输出形态：前端默认不展示。API 内部仍保留本地 `response_item_count` 迹象，但这不是官方 `stream=true/false` 字段，默认不作为看板口径。
 - 消耗金额：按 `pricing.json` 里的每百万 token 费率估算。公式为未缓存输入 token * input rate + 缓存输入 token * cached input rate + 输出 token * output rate。
 - `total_token_usage`：只作为详情里的会话累计快照，不参与请求窗口加总。
 - 去重：默认按 `session_id + last_token_usage_tuple + total_token_usage_snapshot_tuple` 去重；如需原始事件审计，独立脚本可使用 `--no-dedupe`。

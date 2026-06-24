@@ -122,6 +122,22 @@ function normalizeRecordStatus(status, errorReason) {
   return 'success';
 }
 
+function isPartialUsageWithoutBreakdown(usage) {
+  return (
+    usage.total_tokens > 0 &&
+    usage.input_tokens === 0 &&
+    usage.cached_input_tokens === 0 &&
+    usage.output_tokens === 0
+  );
+}
+
+function partialUsageErrorReason(isContextCompaction) {
+  if (isContextCompaction) {
+    return '上下文压缩 token_count 缺少本次输入/输出 usage 明细；session 未记录明确错误原因';
+  }
+  return 'token_count 缺少本次输入/输出 usage 明细；session 未记录明确错误原因';
+}
+
 function loadPricing() {
   try {
     return JSON.parse(fs.readFileSync(PRICING_FILE, 'utf8'));
@@ -364,6 +380,26 @@ function initDb() {
   `);
   ensureColumn(database, 'token_records', 'terminal_event_type', "TEXT NOT NULL DEFAULT 'session.token_count'");
   ensureColumn(database, 'token_records', 'error_reason', 'TEXT');
+  database.prepare(`
+    UPDATE token_records
+    SET
+      status = 'failed',
+      error_reason = CASE
+        WHEN error_reason IS NULL OR error_reason = ''
+          THEN ?
+        ELSE error_reason
+      END,
+      terminal_event_type = CASE
+        WHEN terminal_event_type = 'session.token_count'
+          THEN 'session.token_count.partial_usage'
+        ELSE terminal_event_type
+      END
+    WHERE input_tokens = 0
+      AND cached_input_tokens = 0
+      AND output_tokens = 0
+      AND total_tokens > 0
+      AND (status IS NULL OR lower(status) NOT IN ('failed', 'error'))
+  `).run(partialUsageErrorReason(false));
   return database;
 }
 
@@ -405,6 +441,7 @@ function parseSessionFile(file, stat) {
   let pendingModelStartMs = null;
   let pendingModelStartBasis = null;
   let activeModelCall = null;
+  let pendingContextCompactionTokenCount = false;
   const recordsByTurn = new Map();
   const fileRecords = [];
   const setPendingModelStart = (value, basis) => {
@@ -423,6 +460,9 @@ function parseSessionFile(file, stat) {
       continue;
     }
     const ms = timestampMs(row.timestamp);
+    if (row.type === 'compacted') {
+      pendingContextCompactionTokenCount = true;
+    }
     if (ms != null) {
       if (session.start_ms == null || ms < session.start_ms) session.start_ms = ms;
       if (session.end_ms == null || ms > session.end_ms) session.end_ms = ms;
@@ -551,6 +591,8 @@ function parseSessionFile(file, stat) {
         continue;
       }
       const totalUsage = normalizeUsage(payload.info?.total_token_usage || {});
+      const partialUsage = isPartialUsageWithoutBreakdown(usage);
+      const errorReason = partialUsage ? partialUsageErrorReason(pendingContextCompactionTokenCount) : null;
       const requestStartMs = activeModelCall?.request_start_ms ?? pendingModelStartMs ?? currentTurn?.started_ms ?? null;
       const firstOutputMs = activeModelCall?.first_output_ms ?? null;
       const responseItemCount = activeModelCall?.response_item_count ?? 0;
@@ -581,9 +623,11 @@ function parseSessionFile(file, stat) {
       const record = {
         ms,
         timestamp: row.timestamp || null,
-        terminal_event_type: 'session.token_count',
-        status: 'success',
-        error_reason: null,
+        terminal_event_type: partialUsage
+          ? (pendingContextCompactionTokenCount ? 'session.token_count.context_compaction' : 'session.token_count.partial_usage')
+          : 'session.token_count',
+        status: partialUsage ? 'failed' : 'success',
+        error_reason: errorReason,
         usage,
         total_usage_snapshot: totalUsage.total_tokens > 0 ? totalUsage : null,
         model: currentModel || session.model || '',
@@ -612,6 +656,7 @@ function parseSessionFile(file, stat) {
         records.push(record);
         recordsByTurn.set(currentTurn.id, records);
       }
+      pendingContextCompactionTokenCount = false;
       resetModelCall();
     }
   }
@@ -928,7 +973,9 @@ function summarizeCost(requests) {
   for (const request of requests) {
     const cost = request.cost_estimate;
     const hasTokens = request.usage.total_tokens > 0 || request.usage.input_tokens > 0 || request.usage.output_tokens > 0;
-    if (cost?.known && Number.isFinite(cost.amount_usd)) {
+    const hasBillableBreakdown =
+      request.usage.input_tokens > 0 || request.usage.cached_input_tokens > 0 || request.usage.output_tokens > 0;
+    if (cost?.known && Number.isFinite(cost.amount_usd) && hasBillableBreakdown) {
       amountUsd += cost.amount_usd;
       pricedRecords++;
       const key = cost.model_key || request.model || 'unknown';

@@ -127,7 +127,7 @@ response.created 日志到达时间 -> 第一个 response.output_text.delta / re
 
 当前项目已经剔除 raw SSE，因此不按官方流式 delta 计算 TTFT。Web 看板里的 `first_output_ms_estimate` 是另一个本地 session 口径：最近 user/tool/output 边界到首个 `response_item.timestamp`，不是官方 TTFT。
 
-同理，当前看板的“输出形态 / 流式迹象”只来自 session 内 `token_count` 前的 `response_item_count`，不是官方 `stream=true/false` 参数。
+同理，项目 API 内部保留的“流式迹象”只来自 session 内 `token_count` 前的 `response_item_count`，不是官方 `stream=true/false` 参数；Web 看板默认不展示该字段。
 
 ## 官方组织 Usage / Costs API
 

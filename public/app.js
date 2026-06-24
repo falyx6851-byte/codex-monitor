@@ -211,15 +211,8 @@ function durationTitle(record) {
 function statusPill(record) {
   const failed = String(record.status || 'success').toLowerCase() === 'failed';
   const label = failed ? '失败' : '成功';
-  const title = failed ? record.error_reason || 'session error' : 'session token_count recorded';
+  const title = failed ? record.error_reason || '没有记录明确错误原因' : 'session token_count recorded';
   return `<span class="pill ${failed ? 'bad' : 'ok'}" title="${escapeHtml(title)}">${escapeHtml(label)}</span>`;
-}
-
-function streamPill(record) {
-  if (record.stream_observed === true) {
-    return `<span class="pill warn" title="${escapeHtml(record.stream_observed_basis || '')}">流式</span>`;
-  }
-  return `<span class="pill muted-pill" title="${escapeHtml(record.stream_observed_basis || '')}">非流式</span>`;
 }
 
 function displayRecordId(recordId) {
@@ -272,11 +265,6 @@ function renderRequests() {
         turn_elapsed_ms_estimate: r.turn_elapsed_ms_estimate,
         turn_duration_ms_estimate: r.turn_duration_ms_estimate
       },
-      local_stream_observation: {
-        response_item_count_before_token_count: r.response_item_count,
-        stream_observed: r.stream_observed,
-        stream_observed_basis: r.stream_observed_basis
-      },
       response_timestamps: {
         created_ms: r.created_ms,
         completed_ms: r.completed_ms,
@@ -290,7 +278,6 @@ function renderRequests() {
       <td class="mono">${escapeHtml(clampText(displayId || '—', 24))}</td>
       <td><span class="pill">${escapeHtml(r.model || 'unknown')}</span></td>
       <td>${statusPill(r)}</td>
-      <td>${streamPill(r)}</td>
       <td class="num">${fmtCompact(r.usage.input_tokens)}</td>
       <td class="num">${fmtCompact(r.usage.cached_input_tokens)}</td>
       <td class="num">${fmtCompact(r.usage.output_tokens)}</td>
@@ -301,7 +288,7 @@ function renderRequests() {
       <td class="preview"><span title="${escapeHtml(r.source_context?.cwd || '')}">${escapeHtml(clampText(source, 80))}</span></td>
       <td class="preview"><button type="button" data-detail="${escapeHtml(detail)}">查看</button></td>
     </tr>`;
-  }).join('') || '<tr><td colspan="14" class="muted">暂无请求记录。</td></tr>';
+  }).join('') || '<tr><td colspan="13" class="muted">暂无请求记录。</td></tr>';
 }
 
 function bindDetailButtons() {
