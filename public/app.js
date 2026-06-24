@@ -2,28 +2,24 @@
 
 const state = {
   data: null,
-  lastUrl: '',
-  activeDays: 1
+  activeDays: 1,
+  page: 1,
+  autoEnd: true
 };
 
 const els = {
   status: document.getElementById('statusLine'),
   start: document.getElementById('startInput'),
   end: document.getElementById('endInput'),
-  bucket: document.getElementById('bucketInput'),
-  search: document.getElementById('searchInput'),
+  pageSize: document.getElementById('pageSizeInput'),
   refresh: document.getElementById('refreshBtn'),
   export: document.getElementById('exportBtn'),
-  metrics: document.getElementById('metricGrid'),
-  quotaStamp: document.getElementById('quotaStamp'),
-  quotaBars: document.getElementById('quotaBars'),
-  trustList: document.getElementById('trustList'),
-  chart: document.getElementById('tokenChart'),
-  modelList: document.getElementById('modelList'),
+  metrics: document.getElementById('overview'),
   requestRows: document.getElementById('requestRows'),
   requestCount: document.getElementById('requestCount'),
-  sessionRows: document.getElementById('sessionRows'),
-  sessionCount: document.getElementById('sessionCount'),
+  prevPage: document.getElementById('prevPageBtn'),
+  nextPage: document.getElementById('nextPageBtn'),
+  pageInfo: document.getElementById('pageInfo'),
   dialog: document.getElementById('detailDialog'),
   detail: document.getElementById('detailText')
 };
@@ -87,10 +83,16 @@ function fmtMs(ms) {
   return `${(n / 60_000).toFixed(1)}m`;
 }
 
-function fmtUsd(cost) {
-  if (!cost || cost.usd == null) return cost?.label || '—';
-  if (cost.usd < 0.01) return `$${cost.usd.toFixed(4)}`;
-  return `$${cost.usd.toFixed(2)}`;
+function fmtPercent(value) {
+  if (value == null || Number.isNaN(Number(value))) return '—';
+  return `${(Number(value) * 100).toFixed(1)}%`;
+}
+
+function fmtMoney(value) {
+  if (value == null || Number.isNaN(Number(value))) return '—';
+  const n = Number(value);
+  if (Math.abs(n) < 0.01) return `$${n.toFixed(4)}`;
+  return `$${n.toFixed(2)}`;
 }
 
 function escapeHtml(value) {
@@ -102,7 +104,7 @@ function escapeHtml(value) {
     .replaceAll("'", '&#039;');
 }
 
-function clampText(value, max = 180) {
+function clampText(value, max = 80) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
   if (text.length <= max) return text;
   return `${text.slice(0, max - 1)}…`;
@@ -122,27 +124,29 @@ function setDefaultRange(days = 1) {
   }
   els.start.value = start ? toLocalInput(start) : '';
   els.end.value = toLocalInput(end);
+  state.autoEnd = true;
 }
 
 function queryUrl() {
+  if (state.autoEnd) els.end.value = toLocalInput(Date.now());
   const params = new URLSearchParams();
   const start = fromLocalInput(els.start.value);
-  const end = fromLocalInput(els.end.value) || Date.now();
+  const end = state.autoEnd ? Date.now() : fromLocalInput(els.end.value) || Date.now();
   if (start) params.set('start_ms', String(start));
   else params.set('days', '0');
   params.set('end_ms', String(end));
-  params.set('bucket', els.bucket.value);
-  params.set('limit', '700');
+  params.set('bucket', 'day');
+  params.set('page', String(state.page));
+  params.set('page_size', els.pageSize.value || '7');
   return `/api/data?${params.toString()}`;
 }
 
 async function loadData() {
-  const url = queryUrl();
-  state.lastUrl = url;
   els.status.textContent = '采集中…';
-  const res = await fetch(url, { cache: 'no-store' });
+  const res = await fetch(queryUrl(), { cache: 'no-store' });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   state.data = await res.json();
+  state.page = state.data.pagination?.page || state.page;
   render();
 }
 
@@ -155,214 +159,149 @@ function metric(label, value, sub, accent) {
 }
 
 function renderMetrics(data) {
-  const s = data.summary;
-  const usage = s.request_usage;
-  const sessionUsage = s.session_cumulative_usage || s.session_usage;
-  const quality = data.data_quality?.request_usage_sources || {};
-  const rawCount = Number(quality.raw_sse_plus_otel || 0) + Number(quality.raw_sse || 0);
+  const usage = data.summary.request_usage;
+  const cost = data.summary.estimated_cost || {};
+  const success = countValue(data.counts.status, 'success');
+  const failed = countValue(data.counts.status, 'failed');
   els.metrics.innerHTML = [
-    metric('窗口请求 Token', fmtCompact(usage.total_tokens), `${fmtNum(s.requests)} completed 请求`, 'accent-green'),
-    metric('输入 Token', fmtCompact(usage.input_tokens), `缓存 ${fmtCompact(usage.cached_input_tokens)}`, 'accent-cyan'),
-    metric('输出 Token', fmtCompact(usage.output_tokens), `Reasoning ${fmtCompact(usage.reasoning_output_tokens)}`, 'accent-violet'),
-    metric('请求来源', fmtNum(s.requests), `raw ${fmtNum(rawCount)} / otel ${fmtNum(quality.otel_only || 0)}`, 'accent-amber'),
-    metric('平均耗时', fmtMs(s.average_latency_ms), `首 token ${fmtMs(s.average_first_token_ms_estimate)} 估`, 'accent-red'),
-    metric('估算花费', s.known_cost_requests ? `$${s.known_cost_usd.toFixed(2)}` : '未配置', `${s.known_cost_requests}/${s.requests} 请求有单价 / 会话累计 ${fmtCompact(sessionUsage.total_tokens)}`, 'accent-green')
+    metric('请求记录', fmtNum(data.summary.request_records), `成功 ${fmtNum(success)} / 失败 ${fmtNum(failed)}`, 'accent-green'),
+    metric('总 Token', fmtCompact(usage.total_tokens), 'input + output', 'accent-cyan'),
+    metric('缓存命中率', fmtPercent(data.summary.cache_hit_rate), `${fmtCompact(usage.cached_input_tokens)} cached`, 'accent-violet'),
+    metric('输出 Token', fmtCompact(usage.output_tokens), 'last output tokens', 'accent-amber'),
+    metric('消耗金额', fmtMoney(cost.amount_usd), `${fmtNum(cost.priced_records)} 条已计价`, 'accent-amber'),
+    metric(
+      '平均响应耗时',
+      fmtMs(data.summary.average_request_duration_ms_estimate ?? data.summary.average_turn_elapsed_ms_estimate),
+      `首输出 ${fmtMs(data.summary.average_first_output_ms_estimate)}`,
+      'accent-red'
+    )
   ].join('');
 }
 
-function renderQuota(data) {
-  const latest = data.latest_rate_limit;
-  if (!latest?.rate_limits) {
-    els.quotaStamp.textContent = '暂无 rate_limits';
-    els.quotaBars.innerHTML = '<div class="muted">本时间段内没有可用额度事件。</div>';
-    return;
-  }
-  els.quotaStamp.textContent = `${fmtFullDate(latest.ts)} / ${latest.session_id}`;
-  const rows = [];
-  for (const key of ['primary', 'secondary']) {
-    const item = latest.rate_limits[key];
-    if (!item) continue;
-    const used = Number(item.used_percent || 0);
-    const remain = Math.max(0, 100 - used);
-    rows.push(`<div class="quota-row">
-      <div class="quota-meta">
-        <strong>${key === 'primary' ? '短窗口' : '长窗口'}</strong>
-        <span>已用 ${used.toFixed(1)}% / 剩余 ${remain.toFixed(1)}% / ${item.window_minutes || '—'} min</span>
-      </div>
-      <div class="bar"><span style="width:${Math.min(100, Math.max(0, used))}%"></span></div>
-    </div>`);
-  }
-  els.quotaBars.innerHTML = rows.join('') || '<div class="muted">rate_limits 存在，但窗口为空。</div>';
+function countValue(rows, key) {
+  return rows?.find((row) => row.key === key)?.count || 0;
 }
 
-function renderTrust(data) {
-  const d = data.diagnostics;
-  const notes = [
-    `JSONL：${fmtNum(d.session_files)} 个 session 文件，${fmtNum(d.token_events)} 个 token_count 事件。`,
-    `SQLite：${d.sqlite_exists ? '可读' : '不存在'}，请求记录 ${fmtNum(d.request_records)} 条。`,
-    '主指标：按窗口内 completed 请求聚合；会话 token 是累计诊断，不作为窗口消耗。',
-    '费用：API key 可按配置单价估算；ChatGPT OAuth 显示 API 等价估算，不等于账单。',
-    'IP：本地 session/SSE 日志未记录上游出口 IP，本页不做抓包、反代或 OAuth token 读取。'
-  ];
-  els.trustList.innerHTML = notes.map((x) => `<li>${escapeHtml(x)}</li>`).join('');
+function formatCountKey(key, label) {
+  const value = String(key || 'unknown');
+  if (label === '状态' && value === 'success') return '成功';
+  if (label === '状态' && value === 'failed') return '失败';
+  if (label === '来源' && (value === 'codex-tui' || value === 'cli')) return 'Codex 本地';
+  if (label === '来源' && value === 'Codex Desktop') return 'Codex App';
+  return value;
 }
 
-function drawTokenChart(data) {
-  const canvas = els.chart;
-  const rect = canvas.getBoundingClientRect();
-  const ratio = window.devicePixelRatio || 1;
-  canvas.width = Math.max(600, Math.floor(rect.width * ratio));
-  canvas.height = Math.floor(260 * ratio);
-  const ctx = canvas.getContext('2d');
-  ctx.scale(ratio, ratio);
-  const w = canvas.width / ratio;
-  const h = canvas.height / ratio;
-  ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = '#fffef8';
-  ctx.fillRect(0, 0, w, h);
-
-  const rows = data.buckets.requests || [];
-  const padL = 48;
-  const padR = 18;
-  const padT = 20;
-  const padB = 42;
-  const chartW = w - padL - padR;
-  const chartH = h - padT - padB;
-  const max = Math.max(1, ...rows.map((r) => r.usage.total_tokens));
-
-  ctx.strokeStyle = '#d9d8ce';
-  ctx.lineWidth = 1;
-  ctx.font = '11px Cascadia Code, Consolas, monospace';
-  ctx.fillStyle = '#64645d';
-  for (let i = 0; i <= 4; i++) {
-    const y = padT + chartH * (i / 4);
-    ctx.beginPath();
-    ctx.moveTo(padL, y);
-    ctx.lineTo(w - padR, y);
-    ctx.stroke();
-    const value = max * (1 - i / 4);
-    ctx.fillText(fmtCompact(value), 6, y + 4);
-  }
-
-  if (!rows.length) {
-    ctx.fillStyle = '#64645d';
-    ctx.fillText('暂无数据', padL, padT + 36);
-    return;
-  }
-
-  const gap = 5;
-  const bw = Math.max(4, (chartW - gap * (rows.length - 1)) / rows.length);
-  rows.forEach((row, i) => {
-    const x = padL + i * (bw + gap);
-    const total = Math.max(1, row.usage.total_tokens);
-    const cachedH = chartH * (row.usage.cached_input_tokens / max);
-    const inputH = chartH * (Math.max(0, row.usage.input_tokens - row.usage.cached_input_tokens) / max);
-    const outputH = chartH * (row.usage.output_tokens / max);
-    let y = padT + chartH;
-    ctx.fillStyle = '#128d92';
-    y -= cachedH;
-    ctx.fillRect(x, y, bw, cachedH);
-    ctx.fillStyle = '#18a058';
-    y -= inputH;
-    ctx.fillRect(x, y, bw, inputH);
-    ctx.fillStyle = '#7057c7';
-    y -= outputH;
-    ctx.fillRect(x, y, bw, outputH);
-    if (i % Math.ceil(rows.length / 8) === 0 || rows.length <= 8) {
-      ctx.save();
-      ctx.translate(x, h - 14);
-      ctx.rotate(-0.4);
-      ctx.fillStyle = '#64645d';
-      ctx.fillText(row.label, 0, 0);
-      ctx.restore();
-    }
-  });
-}
-
-function renderModels(data) {
-  const max = Math.max(1, ...data.models.map((m) => m.usage.total_tokens));
-  els.modelList.innerHTML = data.models.slice(0, 9).map((m) => {
-    const width = Math.max(2, (m.usage.total_tokens / max) * 100);
-    return `<div class="model-item">
-      <div class="model-top"><span>${escapeHtml(m.model)}</span><span>${fmtCompact(m.usage.total_tokens)}</span></div>
-      <div class="bar"><span style="width:${width}%"></span></div>
-      <div class="muted">${fmtNum(m.requests)} requests / ${m.cost_known ? `$${m.cost_usd.toFixed(2)}` : '未配置单价'}</div>
-    </div>`;
-  }).join('') || '<div class="muted">暂无请求模型数据。</div>';
+function topCounts(rows, label) {
+  if (!rows?.length) return `${label}：暂无`;
+  return `${label}：${rows.slice(0, 4).map((row) => `${formatCountKey(row.key, label)} ${row.count}`).join(' / ')}`;
 }
 
 function filteredRequests() {
-  const q = els.search.value.trim().toLowerCase();
-  const list = state.data?.requests || [];
-  if (!q) return list;
-  return list.filter((r) => [
-    r.model,
-    r.source_label,
-    r.cwd,
-    r.input_preview,
-    r.output_preview,
-    r.conversation_id
-  ].join(' ').toLowerCase().includes(q));
+  return state.data?.requests || [];
+}
+
+function effectiveDurationMs(record) {
+  return record.duration_ms ?? record.duration_ms_estimate ?? record.turn_elapsed_ms_estimate;
+}
+
+function durationTitle(record) {
+  return record.duration_basis || 'local_session_task_started_to_token_count';
+}
+
+function statusPill(record) {
+  const failed = String(record.status || 'success').toLowerCase() === 'failed';
+  const label = failed ? '失败' : '成功';
+  const title = failed ? record.error_reason || 'session error' : 'session token_count recorded';
+  return `<span class="pill ${failed ? 'bad' : 'ok'}" title="${escapeHtml(title)}">${escapeHtml(label)}</span>`;
+}
+
+function streamPill(record) {
+  if (record.stream_observed === true) {
+    return `<span class="pill warn" title="${escapeHtml(record.stream_observed_basis || '')}">流式</span>`;
+  }
+  return `<span class="pill muted-pill" title="${escapeHtml(record.stream_observed_basis || '')}">非流式</span>`;
+}
+
+function displayRecordId(recordId) {
+  return String(recordId || '').replace(/^session-token-/, '');
+}
+
+function sourceLabel(context = {}) {
+  const client = context.originator || context.session_source;
+  const clientLabel = client?.startsWith('codex') || client === 'cli' ? 'Codex 本地' : client || '本地 session';
+  return [clientLabel, context.model_provider].filter(Boolean).join(' / ');
 }
 
 function renderRequests() {
   const rows = filteredRequests();
-  els.requestCount.textContent = `${fmtNum(rows.length)} / ${fmtNum(state.data?.requests?.length || 0)}`;
+  const page = state.data?.pagination || { page: 1, total_pages: 1, total_records: rows.length, page_size: 7 };
+  els.requestCount.textContent = `${fmtNum(rows.length)} 当前页 / ${fmtNum(page.total_records)} 总记录`;
+  els.pageInfo.textContent = `${fmtNum(page.page)} / ${fmtNum(page.total_pages)}`;
+  els.prevPage.disabled = page.page <= 1;
+  els.nextPage.disabled = page.page >= page.total_pages;
+
   els.requestRows.innerHTML = rows.map((r) => {
+    const source = [
+      sourceLabel(r.source_context)
+    ]
+      .filter(Boolean)
+      .join(' / ') || '—';
+    const displayId = displayRecordId(r.record_id || r.conversation_id || '');
     const detail = JSON.stringify({
-      time: fmtFullDate(r.completed_ms),
-      response_id: r.response_id,
-      conversation_id: r.conversation_id,
-      model: r.model,
-      source: r.source_label,
-      cwd: r.cwd,
-      usage: r.usage,
-      first_token_ms_estimate: r.first_token_ms_estimate,
-      duration_ms: r.duration_ms,
-      cost: r.cost,
-      input_preview: r.input_preview,
-      output_preview: r.output_preview,
-      merge_quality: r.merge_quality,
-      terminal_type: r.terminal_type,
-      official_response: r.official_response,
-      source_ip: r.source_ip
+      token_usage_normalized: r.usage,
+      token_usage_source: r.usage_source,
+      cost_estimate: r.cost_estimate,
+      status: r.status,
+      error_reason: r.error_reason,
+      session_total_usage_snapshot: r.total_usage_snapshot,
+      model_context_window: r.model_context_window,
+      local_session_timing_estimate: {
+        duration_ms_estimate: r.duration_ms_estimate,
+        duration_basis: r.duration_basis,
+        request_started_ms_estimate: r.request_started_ms_estimate,
+        request_duration_ms_estimate: r.request_duration_ms_estimate,
+        request_duration_basis: r.request_duration_basis,
+        first_output_ms_estimate: r.first_output_ms_estimate,
+        first_output_event_ms: r.first_output_event_ms,
+        first_output_event_type: r.first_output_event_type,
+        first_output_basis: r.first_output_basis,
+        turn_id: r.turn_id,
+        turn_sequence: r.turn_sequence,
+        turn_started_ms: r.turn_started_ms,
+        turn_completed_ms: r.turn_completed_ms,
+        turn_elapsed_ms_estimate: r.turn_elapsed_ms_estimate,
+        turn_duration_ms_estimate: r.turn_duration_ms_estimate
+      },
+      local_stream_observation: {
+        response_item_count_before_token_count: r.response_item_count,
+        stream_observed: r.stream_observed,
+        stream_observed_basis: r.stream_observed_basis
+      },
+      response_timestamps: {
+        created_ms: r.created_ms,
+        completed_ms: r.completed_ms,
+        response_timestamp_ms: r.response_timestamp_ms,
+        response_timestamp_source: r.response_timestamp_source
+      },
+      source_context: r.source_context
     }, null, 2);
-    const summary = clampText(r.input_preview || r.output_preview || r.response_id || '', 150);
     return `<tr>
       <td class="mono">${fmtDate(r.completed_ms)}</td>
+      <td class="mono">${escapeHtml(clampText(displayId || '—', 24))}</td>
       <td><span class="pill">${escapeHtml(r.model || 'unknown')}</span></td>
-      <td>${escapeHtml(r.source_label || 'unknown')}</td>
+      <td>${statusPill(r)}</td>
+      <td>${streamPill(r)}</td>
       <td class="num">${fmtCompact(r.usage.input_tokens)}</td>
       <td class="num">${fmtCompact(r.usage.cached_input_tokens)}</td>
       <td class="num">${fmtCompact(r.usage.output_tokens)}</td>
-      <td class="num">${fmtMs(r.first_token_ms_estimate)}</td>
-      <td class="num">${fmtMs(r.duration_ms)}</td>
-      <td class="num" title="${escapeHtml(r.cost?.label || '')}">${escapeHtml(fmtUsd(r.cost))}</td>
-      <td>${r.source_ip ? escapeHtml(r.source_ip) : '<span class="muted">未记录</span>'}</td>
-      <td class="preview"><button type="button" data-detail="${escapeHtml(detail)}">${escapeHtml(summary || '查看')}</button></td>
+      <td class="num">${fmtCompact(r.usage.total_tokens)}</td>
+      <td class="num" title="${escapeHtml(r.cost_estimate?.known ? `${r.cost_estimate.model_key} / ${r.cost_estimate.tier}` : r.cost_estimate?.reason || '')}">${fmtMoney(r.cost_estimate?.amount_usd)}</td>
+      <td class="num" title="${escapeHtml(r.first_output_basis || '')}">${fmtMs(r.first_output_ms_estimate)}</td>
+      <td class="num" title="${escapeHtml(durationTitle(r))}">${fmtMs(effectiveDurationMs(r))}</td>
+      <td class="preview"><span title="${escapeHtml(r.source_context?.cwd || '')}">${escapeHtml(clampText(source, 80))}</span></td>
+      <td class="preview"><button type="button" data-detail="${escapeHtml(detail)}">查看</button></td>
     </tr>`;
-  }).join('') || '<tr><td colspan="11" class="muted">暂无请求记录。</td></tr>';
-}
-
-function renderSessions(data) {
-  els.sessionCount.textContent = fmtNum(data.sessions.length);
-  els.sessionRows.innerHTML = data.sessions.map((s) => {
-    const lastUser = [...(s.messages || [])].reverse().find((m) => m.role === 'user');
-    const lastAssistant = [...(s.messages || [])].reverse().find((m) => m.role === 'assistant');
-    const preview = [
-      lastUser ? `Q: ${clampText(lastUser.text, 130)}` : '',
-      lastAssistant ? `A: ${clampText(lastAssistant.text, 130)}` : ''
-    ].filter(Boolean).join('\n');
-    return `<tr>
-      <td class="mono">${fmtDate(s.end_ms)}</td>
-      <td class="mono">${escapeHtml(s.id)}</td>
-      <td>${escapeHtml([s.model_provider, s.originator, s.source].filter(Boolean).join(' / ') || 'unknown')}</td>
-      <td><span class="pill">${escapeHtml(s.model || 'unknown')}</span></td>
-      <td class="num">${fmtCompact(s.usage.total_tokens)}</td>
-      <td>${escapeHtml(clampText(s.cwd || s.file, 180))}</td>
-      <td class="preview">${escapeHtml(preview || '—')}</td>
-    </tr>`;
-  }).join('') || '<tr><td colspan="7" class="muted">暂无会话。</td></tr>';
+  }).join('') || '<tr><td colspan="14" class="muted">暂无请求记录。</td></tr>';
 }
 
 function bindDetailButtons() {
@@ -378,24 +317,23 @@ function render() {
   const data = state.data;
   if (!data) return;
   renderMetrics(data);
-  renderQuota(data);
-  renderTrust(data);
-  drawTokenChart(data);
-  renderModels(data);
   renderRequests();
-  renderSessions(data);
   bindDetailButtons();
-  const generated = fmtFullDate(data.generated_at);
-  els.status.textContent = `更新 ${generated} / ${data.diagnostics.sessions_dir}`;
+  els.status.textContent = `更新 ${fmtFullDate(data.generated_at)} / session token_count 口径`;
+}
+
+function resetPageAndLoad() {
+  state.page = 1;
+  loadData().catch(showError);
 }
 
 document.querySelectorAll('.chip').forEach((btn) => {
-  btn.addEventListener('click', async () => {
+  btn.addEventListener('click', () => {
     document.querySelectorAll('.chip').forEach((x) => x.classList.remove('active'));
     btn.classList.add('active');
     state.activeDays = Number(btn.dataset.days);
     setDefaultRange(state.activeDays);
-    await loadData().catch(showError);
+    resetPageAndLoad();
   });
 });
 
@@ -406,19 +344,24 @@ els.export.addEventListener('click', () => {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `codex-token-monitor-${Date.now()}.json`;
+  a.download = `codex-session-token-records-${Date.now()}.json`;
   a.click();
   URL.revokeObjectURL(url);
 });
-els.bucket.addEventListener('change', () => loadData().catch(showError));
-els.start.addEventListener('change', () => loadData().catch(showError));
-els.end.addEventListener('change', () => loadData().catch(showError));
-els.search.addEventListener('input', () => {
-  renderRequests();
-  bindDetailButtons();
+els.start.addEventListener('change', resetPageAndLoad);
+els.end.addEventListener('change', () => {
+  state.autoEnd = false;
+  resetPageAndLoad();
 });
-window.addEventListener('resize', () => {
-  if (state.data) drawTokenChart(state.data);
+els.pageSize.addEventListener('change', resetPageAndLoad);
+els.prevPage.addEventListener('click', () => {
+  state.page = Math.max(1, state.page - 1);
+  loadData().catch(showError);
+});
+els.nextPage.addEventListener('click', () => {
+  const totalPages = state.data?.pagination?.total_pages || state.page + 1;
+  state.page = Math.min(totalPages, state.page + 1);
+  loadData().catch(showError);
 });
 
 function showError(error) {

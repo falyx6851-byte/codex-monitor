@@ -4,7 +4,8 @@
   "private": true,
   "description": "Local Codex token and request monitoring dashboard.",
   "scripts": {
-    "start": "node --no-warnings server.js"
+    "start": "node --no-warnings server.js",
+    "report": "node scripts/codex-token-report.mjs"
   },
   "engines": {
     "node": ">=24"

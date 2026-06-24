@@ -21,6 +21,11 @@
       </div>
     </header>
 
+    <nav class="section-tabs" aria-label="页面导航">
+      <a href="#overview">概览</a>
+      <a href="#requests">请求明细</a>
+    </nav>
+
     <section class="controls">
       <div class="quick">
         <button class="chip active" data-days="1" type="button">今日</button>
@@ -37,102 +42,53 @@
         <input id="endInput" type="datetime-local">
       </label>
       <label>
-        <span>粒度</span>
-        <select id="bucketInput">
-          <option value="hour">小时</option>
-          <option value="day" selected>日</option>
-          <option value="week">周</option>
+        <span>每页</span>
+        <select id="pageSizeInput">
+          <option value="7" selected>7</option>
+          <option value="10">10</option>
+          <option value="25">25</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
         </select>
-      </label>
-      <label class="search">
-        <span>过滤</span>
-        <input id="searchInput" type="search" placeholder="model / source / cwd / text">
       </label>
     </section>
 
     <main>
-      <section class="metric-grid" id="metricGrid"></section>
+      <section id="overview" class="metric-grid" aria-label="监控概览"></section>
 
-      <section class="quota-grid">
-        <article class="panel quota-panel">
-          <div class="panel-head">
-            <h2>额度窗口</h2>
-            <span id="quotaStamp" class="muted">暂无</span>
-          </div>
-          <div id="quotaBars" class="quota-bars"></div>
-        </article>
-        <article class="panel note-panel">
-          <div class="panel-head">
-            <h2>数据可信度</h2>
-            <span class="muted">只读本机日志</span>
-          </div>
-          <ul id="trustList"></ul>
-        </article>
-      </section>
-
-      <section class="chart-grid">
-        <article class="panel wide">
-          <div class="panel-head">
-            <h2>Token 趋势</h2>
-            <span class="muted">按 completed 请求汇总</span>
-          </div>
-          <canvas id="tokenChart" height="260"></canvas>
-        </article>
-        <article class="panel">
-          <div class="panel-head">
-            <h2>模型分布</h2>
-            <span class="muted">按请求 token</span>
-          </div>
-          <div id="modelList" class="model-list"></div>
-        </article>
-      </section>
-
-      <section class="panel table-panel">
+      <section class="panel table-panel" id="requests">
         <div class="panel-head">
-          <h2>请求记录</h2>
-          <span id="requestCount" class="muted">0</span>
+          <div>
+            <h2>请求明细</h2>
+            <span id="requestCount" class="muted">0</span>
+          </div>
+          <div class="pager">
+            <button id="prevPageBtn" class="button" type="button">上一页</button>
+            <span id="pageInfo" class="muted">1 / 1</span>
+            <button id="nextPageBtn" class="button" type="button">下一页</button>
+          </div>
         </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>时间</th>
+                <th>记录时间</th>
+                <th>记录 ID</th>
                 <th>模型</th>
-                <th>来源</th>
+                <th>状态</th>
+                <th>输出形态</th>
                 <th>输入</th>
                 <th>缓存</th>
                 <th>输出</th>
-                <th>首 token</th>
-                <th>耗时</th>
-                <th>花费</th>
-                <th>IP</th>
-                <th>摘要</th>
+                <th>总 token</th>
+                <th>费用</th>
+                <th>首输出估算</th>
+                <th>响应耗时估算</th>
+                <th>来源补充</th>
+                <th>详情</th>
               </tr>
             </thead>
             <tbody id="requestRows"></tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="panel table-panel">
-        <div class="panel-head">
-          <h2>会话诊断</h2>
-          <span id="sessionCount" class="muted">0</span>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>更新时间</th>
-                <th>线程</th>
-                <th>来源</th>
-                <th>模型</th>
-                <th>累计 token</th>
-                <th>上下文</th>
-                <th>最近输入 / 输出</th>
-              </tr>
-            </thead>
-            <tbody id="sessionRows"></tbody>
           </table>
         </div>
       </section>

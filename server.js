@@ -4,41 +4,29 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const { URL } = require('url');
 
-let DatabaseSync = null;
+let DatabaseSync;
 try {
   ({ DatabaseSync } = require('node:sqlite'));
-} catch {
-  DatabaseSync = null;
+} catch (error) {
+  throw new Error('Codex Token Monitor dashboard requires Node.js 24+ for node:sqlite. The standalone report script still supports Node.js 18+.');
 }
 
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
+const DATA_DIR = path.join(ROOT, 'data');
+const DB_FILE = path.join(DATA_DIR, 'codex-token-monitor.sqlite');
+const PRICING_FILE = path.join(ROOT, 'pricing.json');
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
 const SESSIONS_DIR = path.join(CODEX_HOME, 'sessions');
-const LOG_DB = path.join(CODEX_HOME, 'logs_2.sqlite');
 const PORT = Number(process.env.CODEX_TOKEN_MONITOR_PORT || process.env.PORT || 4127);
 const HOST = process.env.CODEX_TOKEN_MONITOR_HOST || '127.0.0.1';
 const CACHE_TTL_MS = Number(process.env.CODEX_TOKEN_MONITOR_CACHE_MS || 8000);
-const MAX_TEXT = Number(process.env.CODEX_TOKEN_MONITOR_TEXT_CHARS || 1200);
-
-const pricing = readJson(path.join(ROOT, 'pricing.json'), {
-  currency: 'USD',
-  unit: 'per_1m_tokens',
-  models: {},
-  notes: []
-});
+const MAX_REQUEST_DURATION_ESTIMATE_MS = 10 * 60 * 1000;
 
 const cache = new Map();
-
-function readJson(file, fallback) {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch {
-    return fallback;
-  }
-}
 
 function walkFiles(dir, predicate, out = []) {
   let entries = [];
@@ -68,28 +56,18 @@ function timestampMs(value) {
   return Number.isFinite(ms) ? ms : null;
 }
 
-function rowMs(row) {
-  return Number(row.ts) * 1000 + Math.floor(Number(row.ts_nanos || 0) / 1_000_000);
-}
-
-function finiteNumber(value) {
+function finiteOrZero(value) {
   const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-function clip(value, max = MAX_TEXT) {
-  if (value == null) return '';
-  const text = String(value).replace(/\s+/g, ' ').trim();
-  if (text.length <= max) return text;
-  return text.slice(0, max - 1) + '…';
+  return Number.isFinite(n) ? n : 0;
 }
 
 function normalizeUsage(usage) {
-  const input = Number(usage?.input_tokens || 0);
-  const cached = Number(usage?.cached_input_tokens ?? usage?.input_tokens_details?.cached_tokens ?? 0);
-  const output = Number(usage?.output_tokens || 0);
-  const reasoning = Number(usage?.reasoning_output_tokens ?? usage?.output_tokens_details?.reasoning_tokens ?? 0);
-  const total = Number(usage?.total_tokens || input + output);
+  const input = finiteOrZero(usage?.input_tokens);
+  const cached = finiteOrZero(usage?.cached_input_tokens ?? usage?.input_tokens_details?.cached_tokens);
+  const output = finiteOrZero(usage?.output_tokens);
+  const reasoning = finiteOrZero(usage?.reasoning_output_tokens ?? usage?.output_tokens_details?.reasoning_tokens);
+  const hasOfficialTotal = usage?.total_tokens != null;
+  const total = hasOfficialTotal ? finiteOrZero(usage.total_tokens) : input + output;
   return {
     input_tokens: input,
     cached_input_tokens: cached,
@@ -119,522 +97,112 @@ function emptyUsage() {
   };
 }
 
-function estimateCost(model, usage, authMode) {
-  const rates = pricing.models?.[model];
-  if (!rates) {
-    return {
-      usd: null,
-      currency: pricing.currency || 'USD',
-      status: 'unpriced',
-      label: '未配置官方单价'
-    };
-  }
-  const cached = Math.min(usage.cached_input_tokens || 0, usage.input_tokens || 0);
-  const uncached = Math.max((usage.input_tokens || 0) - cached, 0);
-  const usd = (
-    uncached * Number(rates.input || 0) +
-    cached * Number(rates.cached_input || rates.input || 0) +
-    (usage.output_tokens || 0) * Number(rates.output || 0)
-  ) / 1_000_000;
-  const chatgpt = String(authMode || '').toLowerCase().includes('chatgpt');
-  return {
-    usd,
-    currency: pricing.currency || 'USD',
-    status: chatgpt ? 'api_equivalent_not_bill' : 'api_estimate',
-    label: chatgpt ? 'API 等价估算，非套餐账单' : 'API 估算'
-  };
+function usageTuple(usage) {
+  return [
+    usage.input_tokens,
+    usage.cached_input_tokens,
+    usage.output_tokens,
+    usage.reasoning_output_tokens,
+    usage.total_tokens
+  ].join('/');
 }
 
-function parseKvLog(body) {
-  const out = {};
-  const re = /(\w+(?:\.\w+)*)=("(?:[^"\\]|\\.)*"|[^\s]+)/g;
-  let m;
-  while ((m = re.exec(body))) {
-    let value = m[2];
-    if (value.startsWith('"')) {
-      try {
-        value = JSON.parse(value);
-      } catch {
-        value = value.slice(1, -1);
-      }
-    }
-    out[m[1]] = value;
-  }
-  return out;
+function dedupeKey(sessionId, usage, totalUsageSnapshot) {
+  const snapshot = totalUsageSnapshot || emptyUsage();
+  return `${sessionId}|last=${usageTuple(usage)}|total=${usageTuple(snapshot)}`;
 }
 
-function extractResponseOutput(response) {
-  const parts = [];
-  for (const item of response?.output || []) {
-    if (item?.type === 'message') {
-      for (const content of item.content || []) {
-        if (typeof content?.text === 'string') parts.push(content.text);
-      }
-    } else if (item?.type === 'function_call') {
-      const args = typeof item.arguments === 'string' ? item.arguments : JSON.stringify(item.arguments || {});
-      parts.push(`[tool] ${item.name || 'function_call'} ${clip(args, 240)}`);
-    } else if (item?.type) {
-      parts.push(`[${item.type}]`);
-    }
-  }
-  return clip(parts.join('\n'), 1600);
+function shortHash(value) {
+  return crypto.createHash('sha1').update(String(value || '')).digest('hex').slice(0, 12);
 }
 
-function summarizeOutputItems(output) {
-  if (!Array.isArray(output)) return [];
-  return output.map((item) => ({
-    id: item?.id || null,
-    type: item?.type || null,
-    status: item?.status || null,
-    role: item?.role || null,
-    content_types: Array.isArray(item?.content)
-      ? item.content.map((content) => content?.type || null).filter(Boolean)
-      : [],
-    tool_name: item?.name || null,
-    call_id: item?.call_id || null
-  }));
+function normalizeRecordStatus(status, errorReason) {
+  const value = String(status || '').toLowerCase();
+  if (value === 'failed' || value === 'error' || errorReason) return 'failed';
+  return 'success';
 }
 
-function summarizeTools(tools) {
-  if (!Array.isArray(tools)) return [];
-  return tools.map((tool) => ({
-    type: tool?.type || null,
-    name: tool?.name || null
-  }));
-}
-
-function officialResponseSnapshot(response) {
-  return {
-    source: 'responses.response.completed',
-    object: response.object || null,
-    id: response.id || null,
-    status: response.status || null,
-    model: response.model || null,
-    created_at: response.created_at ?? null,
-    completed_at: response.completed_at ?? null,
-    service_tier: response.service_tier ?? null,
-    usage: response.usage || null,
-    tool_usage: response.tool_usage || null,
-    error: response.error || null,
-    incomplete_details: response.incomplete_details || null,
-    metadata: response.metadata || null,
-    reasoning: response.reasoning || null,
-    text: response.text || null,
-    truncation: response.truncation ?? null,
-    parallel_tool_calls: response.parallel_tool_calls ?? null,
-    prompt_cache_key: response.prompt_cache_key ?? null,
-    prompt_cache_retention: response.prompt_cache_retention ?? null,
-    output_items: summarizeOutputItems(response.output),
-    tools: summarizeTools(response.tools)
-  };
-}
-
-function parseSessionIdFromPath(file) {
-  const name = path.basename(file, '.jsonl');
-  const m = name.match(/rollout-[^-]+-[^-]+-(.+)$/);
-  return m ? m[1] : name;
-}
-
-function parseSessionLogs() {
-  const files = walkFiles(SESSIONS_DIR, (file) => file.endsWith('.jsonl'));
-  const sessions = [];
-  const allMessages = new Map();
-  let latestRateLimit = null;
-  let malformedLines = 0;
-  let tokenEventCount = 0;
-
-  for (const file of files) {
-    let text = '';
-    let stat = null;
-    try {
-      stat = fs.statSync(file);
-      text = fs.readFileSync(file, 'utf8');
-    } catch {
-      continue;
-    }
-
-    const session = {
-      id: parseSessionIdFromPath(file),
-      file,
-      cwd: '',
-      source: '',
-      thread_source: '',
-      originator: '',
-      model_provider: '',
-      cli_version: '',
-      model: '',
-      effort: '',
-      start_ms: null,
-      end_ms: stat.mtimeMs,
-      token_events: 0,
-      turns_started: 0,
-      turns_completed: 0,
-      tool_calls: 0,
-      web_searches: 0,
-      messages: [],
-      usage: emptyUsage(),
-      last_rate_limits: null
-    };
-
-    let lastTotal = null;
-    let lastUsage = null;
-    for (const line of text.split(/\r?\n/)) {
-      if (!line) continue;
-      const row = parseJsonLine(line);
-      if (!row) {
-        malformedLines++;
-        continue;
-      }
-      const ms = timestampMs(row.timestamp);
-      if (ms != null) {
-        if (session.start_ms == null || ms < session.start_ms) session.start_ms = ms;
-        if (ms > session.end_ms) session.end_ms = ms;
-      }
-      const payload = row.payload || {};
-      const eventTs = ms ?? session.end_ms ?? stat.mtimeMs;
-      if (row.type === 'session_meta') {
-        Object.assign(session, {
-          id: payload.id || session.id,
-          cwd: payload.cwd || session.cwd,
-          source: typeof payload.source === 'string' ? payload.source : JSON.stringify(payload.source || ''),
-          thread_source: payload.thread_source || '',
-          originator: payload.originator || '',
-          model_provider: payload.model_provider || '',
-          cli_version: payload.cli_version || ''
-        });
-        if (payload.timestamp && session.start_ms == null) session.start_ms = timestampMs(payload.timestamp);
-      } else if (row.type === 'turn_context') {
-        if (payload.model) session.model = payload.model;
-        if (payload.effort) session.effort = payload.effort;
-      } else if (row.type === 'response_item') {
-        if (payload.type === 'function_call') session.tool_calls++;
-      } else if (row.type === 'event_msg') {
-        if (payload.type === 'task_started') session.turns_started++;
-        if (payload.type === 'task_complete') session.turns_completed++;
-        if (payload.type === 'web_search_call') session.web_searches++;
-        if (payload.type === 'token_count') {
-          tokenEventCount++;
-          session.token_events++;
-          lastTotal = normalizeUsage(payload.info?.total_token_usage);
-          lastUsage = normalizeUsage(payload.info?.last_token_usage);
-          if (payload.rate_limits) {
-            session.last_rate_limits = payload.rate_limits;
-            if (!latestRateLimit || eventTs > latestRateLimit.ts) {
-              latestRateLimit = {
-                ts: eventTs,
-                session_id: session.id,
-                rate_limits: payload.rate_limits
-              };
-            }
-          }
-        }
-        if (payload.type === 'user_message' || payload.type === 'agent_message') {
-          const role = payload.type === 'user_message' ? 'user' : 'assistant';
-          session.messages.push({
-            role,
-            ts: ms,
-            text: clip(payload.message || '', 1600),
-            chars: String(payload.message || '').length
-          });
-        }
-      }
-    }
-
-    if (lastTotal && lastTotal.total_tokens > 0) session.usage = lastTotal;
-    else if (lastUsage && lastUsage.total_tokens > 0) session.usage = lastUsage;
-    session.start_ms = session.start_ms || stat.birthtimeMs || stat.mtimeMs;
-    allMessages.set(session.id, session.messages);
-    session.messages = session.messages.slice(-8);
-    sessions.push(session);
-  }
-
-  return {
-    sessions,
-    allMessages,
-    diagnostics: {
-      sessions_dir: SESSIONS_DIR,
-      log_db: LOG_DB,
-      session_files: files.length,
-      malformed_lines: malformedLines,
-      token_events: tokenEventCount
-    },
-    latestRateLimit
-  };
-}
-
-function queryDb(sql, params = []) {
-  if (!DatabaseSync || !fs.existsSync(LOG_DB)) return [];
-  let db = null;
+function loadPricing() {
   try {
-    db = new DatabaseSync(LOG_DB, { readOnly: true });
-    return db.prepare(sql).all(...params);
+    return JSON.parse(fs.readFileSync(PRICING_FILE, 'utf8'));
   } catch {
-    return [];
-  } finally {
-    try {
-      db?.close();
-    } catch {}
+    return {
+      currency: 'USD',
+      source: '',
+      updated_at: '',
+      long_context_threshold_tokens: 270000,
+      models: {},
+      aliases: {}
+    };
   }
 }
 
-function parseRawSseRequests(startMs, endMs) {
-  if (!DatabaseSync || !fs.existsSync(LOG_DB)) return [];
-  const startSec = Math.floor(startMs / 1000) - 60;
-  const endSec = Math.ceil(endMs / 1000) + 60;
-  const rows = queryDb(
-    `select id, ts, ts_nanos, feedback_log_body as body
-     from logs
-     where target = 'codex_api::sse::responses'
-       and ts between ? and ?
-       and feedback_log_body like 'SSE event:%response.%'
-     order by id asc`,
-    [startSec, endSec]
-  );
+const pricingConfig = loadPricing();
 
-  const active = new Map();
-  const requests = [];
-
-  for (const row of rows) {
-    let event = null;
-    try {
-      event = JSON.parse(String(row.body || '').replace(/^SSE event:\s*/, ''));
-    } catch {
-      continue;
-    }
-    const nowMs = rowMs(row);
-    if (event.type === 'response.created') {
-      const id = event.response?.id;
-      if (!id) continue;
-      const createdMs = Number(event.response.created_at || 0) > 0 ? Number(event.response.created_at) * 1000 : nowMs;
-      active.set(id, {
-        response_id: id,
-        created_ms: createdMs,
-        created_log_ms: nowMs,
-        first_signal_ms: null,
-        first_token_ms: null,
-        model: event.response?.model || '',
-        sequence_start: event.sequence_number ?? null
-      });
-      continue;
-    }
-
-    if (
-      event.type === 'response.output_text.delta' ||
-      event.type === 'response.function_call_arguments.delta' ||
-      event.type === 'response.content_part.added' ||
-      event.type === 'response.output_item.added'
-    ) {
-      const record = active.size === 1 ? active.values().next().value : null;
-      if (record) {
-        if (record.first_signal_ms == null) record.first_signal_ms = Math.max(0, nowMs - record.created_log_ms);
-        if (
-          record.first_token_ms == null &&
-          (event.type === 'response.output_text.delta' || event.type === 'response.function_call_arguments.delta')
-        ) {
-          record.first_token_ms = Math.max(0, nowMs - record.created_log_ms);
-        }
-      }
-      continue;
-    }
-
-    if (event.type === 'response.completed') {
-      const response = event.response || {};
-      const id = response.id || `completed-${row.id}`;
-      const soleActive = active.size === 1 ? active.values().next().value : null;
-      const matchedActiveId = active.has(id) ? id : soleActive?.response_id;
-      const record = active.get(id) || soleActive || {};
-      const usage = normalizeUsage(response.usage || {});
-      const createdMs = Number(response.created_at || 0) > 0 ? Number(response.created_at) * 1000 : record.created_ms || nowMs;
-      const completedMs = Number(response.completed_at || 0) > 0 ? Number(response.completed_at) * 1000 : nowMs;
-      if (completedMs >= startMs && completedMs <= endMs) {
-        requests.push({
-          id,
-          response_id: id,
-          created_ms: createdMs,
-          completed_ms: completedMs,
-          duration_ms: Math.max(0, completedMs - createdMs),
-          first_token_ms_estimate: record.first_token_ms,
-          first_signal_ms_estimate: record.first_signal_ms,
-          model: response.model || record.model || '',
-          status: response.status || '',
-          usage,
-          official_response: officialResponseSnapshot(response),
-          output_preview: extractResponseOutput(response),
-          conversation_id: null,
-          auth_mode: null,
-          originator: null,
-          app_version: null,
-          source_ip: null,
-          merge_quality: 'raw_sse'
-        });
-      }
-      if (matchedActiveId) active.delete(matchedActiveId);
-    }
-  }
-  return requests;
+function resolvePricing(model) {
+  const raw = String(model || '').trim();
+  if (!raw) return null;
+  const exact = pricingConfig.models?.[raw];
+  if (exact) return { key: raw, pricing: exact };
+  const alias = pricingConfig.aliases?.[raw] || pricingConfig.aliases?.[raw.toLowerCase()];
+  if (alias && pricingConfig.models?.[alias]) return { key: alias, pricing: pricingConfig.models[alias] };
+  return null;
 }
 
-function parseOtelCompletions(startMs, endMs) {
-  if (!DatabaseSync || !fs.existsSync(LOG_DB)) return [];
-  const startSec = Math.floor(startMs / 1000) - 60;
-  const endSec = Math.ceil(endMs / 1000) + 60;
-  const rows = queryDb(
-    `select id, ts, ts_nanos, target, feedback_log_body as body
-     from logs
-     where target in ('codex_otel.trace_safe','codex_otel.log_only')
-       and ts between ? and ?
-       and feedback_log_body like 'event.name="codex.sse_event" event.kind=response.completed%'
-     order by id asc`,
-    [startSec, endSec]
-  );
-  const byKey = new Map();
-  const durationByBaseKey = new Map();
-  for (const row of rows) {
-    const item = parseKvLog(row.body || '');
-    const ms = timestampMs(item['event.timestamp']) || rowMs(row);
-    if (ms < startMs || ms > endMs) continue;
-    const baseKey = [
-      item['conversation.id'] || '',
-      item['event.timestamp'] || '',
-      item.model || ''
-    ].join('|');
-    const durationMs = finiteNumber(item.duration_ms);
-    if (durationMs != null) durationByBaseKey.set(baseKey, durationMs);
-    if (!item.input_token_count) continue;
-    const usage = normalizeUsage({
-      input_tokens: item.input_token_count,
-      cached_input_tokens: item.cached_token_count,
-      output_tokens: item.output_token_count,
-      reasoning_output_tokens: item.reasoning_token_count,
-      total_tokens: item.tool_token_count
-    });
-    const key = [
-      baseKey,
-      usage.input_tokens,
-      usage.cached_input_tokens,
-      usage.output_tokens
-    ].join('|');
-    const existing = byKey.get(key);
-    if (!existing || row.target === 'codex_otel.trace_safe') {
-      byKey.set(key, {
-        id: `otel-${row.id}`,
-        completed_ms: ms,
-        base_key: baseKey,
-        duration_ms: durationMs,
-        model: item.model || '',
-        slug: item.slug || '',
-        usage,
-        conversation_id: item['conversation.id'] || null,
-        auth_mode: item.auth_mode || null,
-        originator: item.originator || null,
-        app_version: item['app.version'] || null,
-        terminal_type: item['terminal.type'] || null,
-        source_ip: null,
-        merge_quality: 'otel'
-      });
-    }
+function estimateCost(usage, model) {
+  const resolved = resolvePricing(model);
+  if (!resolved) {
+    return {
+      currency: pricingConfig.currency || 'USD',
+      amount_usd: null,
+      known: false,
+      model_key: null,
+      tier: null,
+      reason: 'missing_model_pricing'
+    };
   }
-  for (const item of byKey.values()) {
-    if (item.duration_ms == null) item.duration_ms = durationByBaseKey.get(item.base_key) ?? null;
-    delete item.base_key;
-  }
-  return [...byKey.values()];
-}
-
-function mergeRequestMetadata(rawRequests, otelRequests) {
-  const used = new Set();
-  const merged = rawRequests.map((req) => {
-    let best = null;
-    let bestScore = Infinity;
-    for (let i = 0; i < otelRequests.length; i++) {
-      if (used.has(i)) continue;
-      const o = otelRequests[i];
-      const timeDelta = Math.abs((o.completed_ms || 0) - (req.completed_ms || 0));
-      const usageMatch =
-        o.usage.input_tokens === req.usage.input_tokens &&
-        o.usage.cached_input_tokens === req.usage.cached_input_tokens &&
-        o.usage.output_tokens === req.usage.output_tokens;
-      const modelMatch = !o.model || !req.model || o.model === req.model;
-      if (timeDelta <= 5000 && modelMatch && (usageMatch || timeDelta <= 1000)) {
-        const score = timeDelta + (usageMatch ? 0 : 2000);
-        if (score < bestScore) {
-          best = { index: i, data: o };
-          bestScore = score;
-        }
-      }
-    }
-    if (best) {
-      used.add(best.index);
-      return {
-        ...req,
-        duration_ms: best.data.duration_ms ?? req.duration_ms,
-        conversation_id: best.data.conversation_id,
-        auth_mode: best.data.auth_mode,
-        originator: best.data.originator,
-        app_version: best.data.app_version,
-        terminal_type: best.data.terminal_type,
-        merge_quality: 'raw_sse+otel'
-      };
-    }
-    return req;
-  });
-
-  for (let i = 0; i < otelRequests.length; i++) {
-    if (used.has(i)) continue;
-    const o = otelRequests[i];
-    merged.push({
-      id: o.id,
-      response_id: null,
-      created_ms: null,
-      completed_ms: o.completed_ms,
-      duration_ms: o.duration_ms ?? null,
-      first_token_ms_estimate: null,
-      first_signal_ms_estimate: null,
-      model: o.model,
-      status: 'completed',
-      usage: o.usage,
-      official_response: null,
-      output_preview: '',
-      conversation_id: o.conversation_id,
-      auth_mode: o.auth_mode,
-      originator: o.originator,
-      app_version: o.app_version,
-      terminal_type: o.terminal_type,
-      source_ip: null,
-      merge_quality: 'otel_only'
-    });
-  }
-  return merged.sort((a, b) => b.completed_ms - a.completed_ms);
-}
-
-function findNearestMessages(sessionMessages, sessionId, createdMs, completedMs) {
-  const messages = sessionMessages.get(sessionId) || [];
-  let input = null;
-  let output = null;
-  for (const msg of messages) {
-    if (msg.role === 'user' && msg.ts != null && (createdMs == null || msg.ts <= createdMs + 60_000)) input = msg;
-    if (
-      msg.role === 'assistant' &&
-      msg.ts != null &&
-      (createdMs == null || msg.ts >= createdMs - 60_000) &&
-      (completedMs == null || msg.ts <= completedMs + 120_000)
-    ) {
-      output = msg;
-    }
-  }
+  const inputTokens = Math.max(0, finiteOrZero(usage?.input_tokens));
+  const cachedInputTokens = Math.min(inputTokens, Math.max(0, finiteOrZero(usage?.cached_input_tokens)));
+  const uncachedInputTokens = Math.max(0, inputTokens - cachedInputTokens);
+  const outputTokens = Math.max(0, finiteOrZero(usage?.output_tokens));
+  const threshold = Number(pricingConfig.long_context_threshold_tokens || 270000);
+  const useLongContext = resolved.pricing.long_context && inputTokens > threshold;
+  const rates = useLongContext ? resolved.pricing.long_context : resolved.pricing;
+  const inputUsd = (uncachedInputTokens / 1_000_000) * finiteOrZero(rates.input_per_1m);
+  const cachedUsd = (cachedInputTokens / 1_000_000) * finiteOrZero(rates.cached_input_per_1m);
+  const outputUsd = (outputTokens / 1_000_000) * finiteOrZero(rates.output_per_1m);
+  const amountUsd = inputUsd + cachedUsd + outputUsd;
   return {
-    input_preview: input?.text || '',
-    output_preview_from_session: output?.text || ''
+    currency: pricingConfig.currency || 'USD',
+    amount_usd: amountUsd,
+    known: true,
+    model_key: resolved.key,
+    tier: useLongContext ? 'long_context' : 'standard',
+    source: pricingConfig.source || '',
+    updated_at: pricingConfig.updated_at || '',
+    input_tokens_billed_at_input_rate: uncachedInputTokens,
+    cached_input_tokens_billed_at_cached_rate: cachedInputTokens,
+    output_tokens_billed_at_output_rate: outputTokens,
+    rates_per_1m: {
+      input: finiteOrZero(rates.input_per_1m),
+      cached_input: finiteOrZero(rates.cached_input_per_1m),
+      output: finiteOrZero(rates.output_per_1m)
+    },
+    components_usd: {
+      input: inputUsd,
+      cached_input: cachedUsd,
+      output: outputUsd
+    }
   };
 }
 
-function bucketStart(ms, bucket) {
+function bucketStart(ms, width) {
   const d = new Date(ms);
-  if (bucket === 'hour') {
+  if (width === 'hour') {
     d.setMinutes(0, 0, 0);
     return d.getTime();
   }
-  if (bucket === 'week') {
+  if (width === 'week') {
     const day = d.getDay() || 7;
     d.setHours(0, 0, 0, 0);
     d.setDate(d.getDate() - day + 1);
@@ -644,156 +212,844 @@ function bucketStart(ms, bucket) {
   return d.getTime();
 }
 
-function bucketLabel(ms, bucket) {
+function bucketLabel(ms, width) {
   const d = new Date(ms);
-  if (bucket === 'hour') return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:00`;
-  if (bucket === 'week') return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const pad = (n) => String(n).padStart(2, '0');
+  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return width === 'hour' ? `${date} ${pad(d.getHours())}:00` : date;
 }
 
-function summarizeByBuckets(items, bucket) {
+function summarizeBuckets(requests, width) {
   const map = new Map();
-  for (const item of items) {
-    const ms = item.completed_ms || item.end_ms || item.start_ms;
-    if (!ms) continue;
-    const key = bucketStart(ms, bucket);
-    if (!map.has(key)) {
-      map.set(key, {
-        ts: key,
-        label: bucketLabel(key, bucket),
-        requests: 0,
-        sessions: 0,
-        cost_usd: 0,
-        cost_known: 0,
-        usage: emptyUsage()
-      });
-    }
-    const row = map.get(key);
-    if (item.response_id || item.merge_quality?.startsWith('otel')) row.requests++;
-    else row.sessions++;
-    row.usage = addUsage(row.usage, item.usage || emptyUsage());
-    if (item.cost?.usd != null) {
-      row.cost_usd += item.cost.usd;
-      row.cost_known++;
-    }
+  for (const req of requests) {
+    const ts = bucketStart(req.completed_ms || req.response_timestamp_ms || 0, width);
+    const item = map.get(ts) || {
+      ts,
+      label: bucketLabel(ts, width),
+      records: 0,
+      usage: emptyUsage()
+    };
+    item.records++;
+    item.usage = addUsage(item.usage, req.usage);
+    map.set(ts, item);
   }
   return [...map.values()].sort((a, b) => a.ts - b.ts);
 }
 
-function buildData(startMs, endMs, bucket, limit) {
-  const sessionData = parseSessionLogs();
-  const filteredSessions = sessionData.sessions
-    .filter((s) => (s.end_ms || s.start_ms) >= startMs && (s.start_ms || s.end_ms) <= endMs)
-    .sort((a, b) => b.end_ms - a.end_ms);
+function parseSessionIdFromPath(file) {
+  const name = path.basename(file, '.jsonl');
+  const m = name.match(/rollout-[^-]+-[^-]+-(.+)$/);
+  return m ? m[1] : name;
+}
 
-  const rawRequests = parseRawSseRequests(startMs, endMs);
-  const otelRequests = parseOtelCompletions(startMs, endMs);
-  const requests = mergeRequestMetadata(rawRequests, otelRequests);
+const TOKEN_RECORD_COLUMNS = [
+  'record_id',
+  'dedupe_key',
+  'terminal_event_type',
+  'ms',
+  'timestamp',
+  'session_id',
+  'session_file',
+  'cwd',
+  'source',
+  'thread_source',
+  'originator',
+  'model_provider',
+  'cli_version',
+  'model',
+  'effort',
+  'status',
+  'error_reason',
+  'input_tokens',
+  'cached_input_tokens',
+  'output_tokens',
+  'reasoning_output_tokens',
+  'total_tokens',
+  'total_input_tokens_snapshot',
+  'total_cached_input_tokens_snapshot',
+  'total_output_tokens_snapshot',
+  'total_reasoning_output_tokens_snapshot',
+  'total_tokens_snapshot',
+  'model_context_window',
+  'turn_id',
+  'turn_sequence',
+  'request_started_ms_estimate',
+  'request_duration_ms_estimate',
+  'request_duration_basis',
+  'first_output_ms_estimate',
+  'first_output_event_ms',
+  'first_output_event_type',
+  'first_output_basis',
+  'turn_started_ms',
+  'turn_elapsed_ms_estimate',
+  'turn_completed_ms',
+  'turn_duration_ms_estimate',
+  'response_item_count',
+  'stream_observed',
+  'stream_observed_basis',
+  'inserted_at_ms'
+];
 
-  const sessionsById = new Map(sessionData.sessions.map((s) => [s.id, s]));
-  for (const req of requests) {
-    const session = req.conversation_id ? sessionsById.get(req.conversation_id) : null;
-    if (session) {
-      req.cwd = session.cwd;
-      req.session_source = session.source;
-      req.thread_source = session.thread_source;
-      req.model_provider = session.model_provider;
-    } else {
-      req.cwd = '';
-      req.session_source = '';
-      req.thread_source = '';
-      req.model_provider = '';
+function initDb() {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const database = new DatabaseSync(DB_FILE);
+  database.exec(`
+    PRAGMA busy_timeout = 3000;
+
+    CREATE TABLE IF NOT EXISTS session_files (
+      file_path TEXT PRIMARY KEY,
+      file_size INTEGER NOT NULL,
+      mtime_ms REAL NOT NULL,
+      scanned_at_ms INTEGER NOT NULL,
+      session_id TEXT,
+      last_error TEXT,
+      scanned_lines INTEGER NOT NULL DEFAULT 0,
+      malformed_lines INTEGER NOT NULL DEFAULT 0,
+      token_events INTEGER NOT NULL DEFAULT 0,
+      parsed_records INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS token_records (
+      record_id TEXT PRIMARY KEY,
+      dedupe_key TEXT UNIQUE NOT NULL,
+      terminal_event_type TEXT NOT NULL DEFAULT 'session.token_count',
+      ms INTEGER NOT NULL,
+      timestamp TEXT,
+      session_id TEXT NOT NULL,
+      session_file TEXT NOT NULL,
+      cwd TEXT,
+      source TEXT,
+      thread_source TEXT,
+      originator TEXT,
+      model_provider TEXT,
+      cli_version TEXT,
+      model TEXT,
+      effort TEXT,
+      status TEXT,
+      error_reason TEXT,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
+      total_tokens INTEGER NOT NULL DEFAULT 0,
+      total_input_tokens_snapshot INTEGER,
+      total_cached_input_tokens_snapshot INTEGER,
+      total_output_tokens_snapshot INTEGER,
+      total_reasoning_output_tokens_snapshot INTEGER,
+      total_tokens_snapshot INTEGER,
+      model_context_window INTEGER,
+      turn_id TEXT,
+      turn_sequence INTEGER,
+      request_started_ms_estimate INTEGER,
+      request_duration_ms_estimate INTEGER,
+      request_duration_basis TEXT,
+      first_output_ms_estimate INTEGER,
+      first_output_event_ms INTEGER,
+      first_output_event_type TEXT,
+      first_output_basis TEXT,
+      turn_started_ms INTEGER,
+      turn_elapsed_ms_estimate INTEGER,
+      turn_completed_ms INTEGER,
+      turn_duration_ms_estimate INTEGER,
+      response_item_count INTEGER,
+      stream_observed INTEGER,
+      stream_observed_basis TEXT,
+      inserted_at_ms INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_token_records_ms ON token_records(ms);
+    CREATE INDEX IF NOT EXISTS idx_token_records_model ON token_records(model);
+    CREATE INDEX IF NOT EXISTS idx_token_records_session ON token_records(session_id);
+    CREATE INDEX IF NOT EXISTS idx_token_records_session_file ON token_records(session_file);
+  `);
+  ensureColumn(database, 'token_records', 'terminal_event_type', "TEXT NOT NULL DEFAULT 'session.token_count'");
+  ensureColumn(database, 'token_records', 'error_reason', 'TEXT');
+  return database;
+}
+
+const db = initDb();
+
+function ensureColumn(database, table, column, definition) {
+  const columns = database.prepare(`PRAGMA table_info(${table})`).all();
+  if (!columns.some((item) => item.name === column)) {
+    database.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+function parseSessionFile(file, stat) {
+  const text = fs.readFileSync(file, 'utf8');
+  const session = {
+    id: parseSessionIdFromPath(file),
+    file,
+    cwd: '',
+    source: '',
+    thread_source: '',
+    originator: '',
+    model_provider: '',
+    cli_version: '',
+    model: '',
+    start_ms: stat?.birthtimeMs || stat?.mtimeMs || null,
+    end_ms: stat?.mtimeMs || null
+  };
+  const diagnostics = {
+    scanned_lines: 0,
+    malformed_lines: 0,
+    token_events: 0,
+    parsed_records: 0
+  };
+
+  let currentModel = '';
+  let currentEffort = '';
+  let currentTurn = null;
+  let turnSequence = 0;
+  let pendingModelStartMs = null;
+  let pendingModelStartBasis = null;
+  let activeModelCall = null;
+  const recordsByTurn = new Map();
+  const fileRecords = [];
+  const setPendingModelStart = (value, basis) => {
+    if (Number.isFinite(value)) {
+      pendingModelStartMs = value;
+      pendingModelStartBasis = basis;
     }
-    Object.assign(req, findNearestMessages(sessionData.allMessages, req.conversation_id, req.created_ms, req.completed_ms));
-    if (!req.output_preview) req.output_preview = req.output_preview_from_session || '';
-    req.source_label = [req.auth_mode, req.originator, req.terminal_type, req.session_source].filter(Boolean).join(' / ') || 'unknown';
-    req.cost = estimateCost(req.model, req.usage, req.auth_mode);
+  };
+
+  for (const line of text.split(/\r?\n/)) {
+    if (!line) continue;
+    diagnostics.scanned_lines++;
+    const row = parseJsonLine(line);
+    if (!row) {
+      diagnostics.malformed_lines++;
+      continue;
+    }
+    const ms = timestampMs(row.timestamp);
+    if (ms != null) {
+      if (session.start_ms == null || ms < session.start_ms) session.start_ms = ms;
+      if (session.end_ms == null || ms > session.end_ms) session.end_ms = ms;
+    }
+    const payload = row.payload || {};
+    if (row.type === 'session_meta') {
+      Object.assign(session, {
+        id: payload.id || session.id,
+        cwd: payload.cwd || session.cwd,
+        source: typeof payload.source === 'string' ? payload.source : JSON.stringify(payload.source || ''),
+        thread_source: payload.thread_source || '',
+        originator: payload.originator || '',
+        model_provider: payload.model_provider || '',
+        cli_version: payload.cli_version || ''
+      });
+    } else if (row.type === 'turn_context') {
+      if (payload.model) {
+        currentModel = payload.model;
+        session.model = payload.model;
+      }
+      if (payload.effort) currentEffort = payload.effort;
+    } else if (row.type === 'event_msg' && payload.type === 'task_started' && ms != null) {
+      turnSequence++;
+      currentTurn = {
+        id: `${session.id}:turn:${turnSequence}`,
+        sequence: turnSequence,
+        started_ms: ms,
+        started_at: row.timestamp || null
+      };
+      recordsByTurn.set(currentTurn.id, []);
+      setPendingModelStart(ms, 'task_started');
+    } else if (row.type === 'event_msg' && payload.type === 'task_complete' && ms != null) {
+      if (currentTurn) {
+        const records = recordsByTurn.get(currentTurn.id) || [];
+        for (const record of records) {
+          record.turn_completed_ms = ms;
+          record.turn_duration_ms_estimate = Math.max(0, ms - currentTurn.started_ms);
+        }
+        currentTurn = null;
+      }
+    } else if (row.type === 'event_msg' && payload.type === 'user_message' && ms != null) {
+      setPendingModelStart(ms, 'user_message');
+    } else if (
+      row.type === 'event_msg' &&
+      ms != null &&
+      (payload.type?.endsWith('_tool_call_end') ||
+        payload.type?.endsWith('_command_end') ||
+        payload.type?.endsWith('_apply_end') ||
+        payload.type === 'function_call_output')
+    ) {
+      setPendingModelStart(ms, payload.type);
+    } else if (row.type === 'response_item' && ms != null) {
+      if (payload.type === 'function_call_output') {
+        setPendingModelStart(ms, 'function_call_output');
+      } else if (!(payload.type === 'message' && payload.role === 'user')) {
+        if (!activeModelCall) {
+          const requestStartMs = pendingModelStartMs ?? currentTurn?.started_ms ?? ms;
+          activeModelCall = {
+            request_start_ms: requestStartMs,
+            request_start_basis: pendingModelStartBasis || (currentTurn ? 'task_started' : 'first_response_item'),
+            first_output_ms: ms,
+            first_output_type: payload.type || row.type,
+            response_item_count: 0
+          };
+        }
+        activeModelCall.response_item_count++;
+      }
+    } else if (row.type === 'event_msg' && payload.type === 'error') {
+      if (ms == null) continue;
+      const requestStartMs = activeModelCall?.request_start_ms ?? pendingModelStartMs ?? currentTurn?.started_ms ?? null;
+      let requestDurationMs = requestStartMs == null ? null : Math.max(0, ms - requestStartMs);
+      let requestDurationBasis =
+        requestStartMs == null ? null : `${activeModelCall?.request_start_basis || pendingModelStartBasis || 'unknown'}_to_error`;
+      if (requestDurationMs != null && requestDurationMs > MAX_REQUEST_DURATION_ESTIMATE_MS) {
+        requestDurationMs = null;
+        requestDurationBasis = 'stale_local_boundary_excluded';
+      }
+      const responseItemCount = activeModelCall?.response_item_count ?? 0;
+      const errorReason = payload.message || JSON.stringify(payload.codex_error_info || payload);
+      fileRecords.push({
+        ms,
+        timestamp: row.timestamp || null,
+        terminal_event_type: 'session.error',
+        status: 'failed',
+        error_reason: errorReason,
+        usage: emptyUsage(),
+        total_usage_snapshot: null,
+        model: currentModel || session.model || '',
+        effort: currentEffort || '',
+        model_context_window: null,
+        turn_id: currentTurn?.id || null,
+        turn_sequence: currentTurn?.sequence ?? null,
+        turn_started_ms: currentTurn?.started_ms ?? null,
+        turn_elapsed_ms_estimate: currentTurn ? Math.max(0, ms - currentTurn.started_ms) : null,
+        request_started_ms_estimate: requestStartMs,
+        request_duration_ms_estimate: requestDurationMs,
+        request_duration_basis: requestDurationBasis,
+        first_output_ms_estimate: null,
+        first_output_event_ms: activeModelCall?.first_output_ms ?? null,
+        first_output_event_type: activeModelCall?.first_output_type || null,
+        first_output_basis: null,
+        turn_duration_ms_estimate: null,
+        turn_completed_ms: null,
+        response_item_count: responseItemCount,
+        stream_observed: responseItemCount > 1 ? 1 : 0,
+        stream_observed_basis:
+          responseItemCount > 1
+            ? 'multiple_response_items_before_error'
+            : 'no_or_single_response_item_before_error',
+        dedupe_key: `${session.id}|error=${ms}|message=${shortHash(errorReason)}`
+      });
+      setPendingModelStart(ms, 'previous_error');
+      activeModelCall = null;
+    } else if (row.type === 'event_msg' && payload.type === 'token_count') {
+      diagnostics.token_events++;
+      if (ms == null) continue;
+      const resetModelCall = () => {
+        const keepPendingForNext =
+          pendingModelStartMs != null && activeModelCall?.first_output_ms != null && pendingModelStartMs > activeModelCall.first_output_ms;
+        if (!keepPendingForNext) setPendingModelStart(ms, 'previous_token_count');
+        activeModelCall = null;
+      };
+      const usage = normalizeUsage(payload.info?.last_token_usage || {});
+      if (usage.total_tokens <= 0) {
+        resetModelCall();
+        continue;
+      }
+      const totalUsage = normalizeUsage(payload.info?.total_token_usage || {});
+      const requestStartMs = activeModelCall?.request_start_ms ?? pendingModelStartMs ?? currentTurn?.started_ms ?? null;
+      const firstOutputMs = activeModelCall?.first_output_ms ?? null;
+      const responseItemCount = activeModelCall?.response_item_count ?? 0;
+      let requestDurationMs = requestStartMs == null ? null : Math.max(0, ms - requestStartMs);
+      let firstOutputDurationMs =
+        requestStartMs == null || firstOutputMs == null ? null : Math.max(0, firstOutputMs - requestStartMs);
+      let requestDurationBasis =
+        requestStartMs == null ? null : `${activeModelCall?.request_start_basis || pendingModelStartBasis || 'unknown'}_to_token_count`;
+      let firstOutputBasis =
+        firstOutputDurationMs == null
+          ? null
+          : `${activeModelCall?.request_start_basis || pendingModelStartBasis || 'unknown'}_to_first_response_item`;
+      if (requestDurationMs != null && requestDurationMs > MAX_REQUEST_DURATION_ESTIMATE_MS) {
+        requestDurationMs = null;
+        firstOutputDurationMs = null;
+        requestDurationBasis = 'stale_local_boundary_excluded';
+        firstOutputBasis = null;
+      }
+      let streamObserved = null;
+      let streamObservedBasis = 'no_response_item_before_token_count';
+      if (responseItemCount > 1) {
+        streamObserved = 1;
+        streamObservedBasis = 'multiple_response_items_before_token_count';
+      } else if (responseItemCount === 1) {
+        streamObserved = 0;
+        streamObservedBasis = 'single_response_item_before_token_count';
+      }
+      const record = {
+        ms,
+        timestamp: row.timestamp || null,
+        terminal_event_type: 'session.token_count',
+        status: 'success',
+        error_reason: null,
+        usage,
+        total_usage_snapshot: totalUsage.total_tokens > 0 ? totalUsage : null,
+        model: currentModel || session.model || '',
+        effort: currentEffort || '',
+        model_context_window: payload.info?.model_context_window ?? null,
+        turn_id: currentTurn?.id || null,
+        turn_sequence: currentTurn?.sequence ?? null,
+        turn_started_ms: currentTurn?.started_ms ?? null,
+        turn_elapsed_ms_estimate: currentTurn ? Math.max(0, ms - currentTurn.started_ms) : null,
+        request_started_ms_estimate: requestStartMs,
+        request_duration_ms_estimate: requestDurationMs,
+        request_duration_basis: requestDurationBasis,
+        first_output_ms_estimate: firstOutputDurationMs,
+        first_output_event_ms: firstOutputMs,
+        first_output_event_type: activeModelCall?.first_output_type || null,
+        first_output_basis: firstOutputBasis,
+        turn_duration_ms_estimate: null,
+        turn_completed_ms: null,
+        response_item_count: responseItemCount,
+        stream_observed: streamObserved,
+        stream_observed_basis: streamObservedBasis
+      };
+      fileRecords.push(record);
+      if (currentTurn) {
+        const records = recordsByTurn.get(currentTurn.id) || [];
+        records.push(record);
+        recordsByTurn.set(currentTurn.id, records);
+      }
+      resetModelCall();
+    }
   }
 
-  for (const session of filteredSessions) {
-    session.cost = estimateCost(session.model, session.usage, null);
+  let ordinal = 0;
+  const records = fileRecords.map((item) => {
+    ordinal++;
+    const totalUsage = item.total_usage_snapshot;
+    const recordId = `session-token-${session.id}-${item.ms}-${ordinal}`;
+    return {
+      record_id: recordId,
+      dedupe_key: item.dedupe_key || dedupeKey(session.id, item.usage, totalUsage),
+      terminal_event_type: item.terminal_event_type || 'session.token_count',
+      ms: item.ms,
+      timestamp: item.timestamp,
+      session_id: session.id,
+      session_file: file,
+      cwd: session.cwd || '',
+      source: session.source || '',
+      thread_source: session.thread_source || '',
+      originator: session.originator || '',
+      model_provider: session.model_provider || '',
+      cli_version: session.cli_version || '',
+      model: item.model || session.model || '',
+      effort: item.effort || '',
+      status: normalizeRecordStatus(item.status, item.error_reason),
+      error_reason: item.error_reason || null,
+      input_tokens: item.usage.input_tokens,
+      cached_input_tokens: item.usage.cached_input_tokens,
+      output_tokens: item.usage.output_tokens,
+      reasoning_output_tokens: item.usage.reasoning_output_tokens,
+      total_tokens: item.usage.total_tokens,
+      total_input_tokens_snapshot: totalUsage?.input_tokens ?? null,
+      total_cached_input_tokens_snapshot: totalUsage?.cached_input_tokens ?? null,
+      total_output_tokens_snapshot: totalUsage?.output_tokens ?? null,
+      total_reasoning_output_tokens_snapshot: totalUsage?.reasoning_output_tokens ?? null,
+      total_tokens_snapshot: totalUsage?.total_tokens ?? null,
+      model_context_window: item.model_context_window,
+      turn_id: item.turn_id,
+      turn_sequence: item.turn_sequence,
+      request_started_ms_estimate: item.request_started_ms_estimate,
+      request_duration_ms_estimate: item.request_duration_ms_estimate,
+      request_duration_basis: item.request_duration_basis,
+      first_output_ms_estimate: item.first_output_ms_estimate,
+      first_output_event_ms: item.first_output_event_ms,
+      first_output_event_type: item.first_output_event_type,
+      first_output_basis: item.first_output_basis,
+      turn_started_ms: item.turn_started_ms,
+      turn_elapsed_ms_estimate: item.turn_elapsed_ms_estimate,
+      turn_completed_ms: item.turn_completed_ms,
+      turn_duration_ms_estimate: item.turn_duration_ms_estimate,
+      response_item_count: item.response_item_count,
+      stream_observed: item.stream_observed,
+      stream_observed_basis: item.stream_observed_basis,
+      inserted_at_ms: Date.now()
+    };
+  });
+
+  diagnostics.parsed_records = records.length;
+  return { session, records, diagnostics };
+}
+
+function sqliteValue(value) {
+  return value === undefined ? null : value;
+}
+
+function fileNeedsIngest(known, stat) {
+  if (!known) return true;
+  if (Number(known.file_size) !== Number(stat.size)) return true;
+  return Math.abs(Number(known.mtime_ms) - Number(stat.mtimeMs)) > 1;
+}
+
+function ingestChangedSessionFiles() {
+  const startedAt = Date.now();
+  const files = walkFiles(SESSIONS_DIR, (file) => file.endsWith('.jsonl'));
+  const knownStmt = db.prepare('SELECT file_size, mtime_ms FROM session_files WHERE file_path = ?');
+  const changed = [];
+  let statErrors = 0;
+
+  for (const file of files) {
+    try {
+      const stat = fs.statSync(file);
+      const known = knownStmt.get(file);
+      if (fileNeedsIngest(known, stat)) changed.push({ file, stat, known });
+    } catch {
+      statErrors++;
+    }
   }
 
-  const sessionUsage = filteredSessions.reduce((sum, session) => addUsage(sum, session.usage), emptyUsage());
+  const parsed = [];
+  let parseErrors = 0;
+  for (const item of changed) {
+    try {
+      parsed.push({ ...item, parsed: parseSessionFile(item.file, item.stat), error: null });
+    } catch (error) {
+      parseErrors++;
+      parsed.push({ ...item, parsed: null, error });
+    }
+  }
+
+  let insertedRecords = 0;
+  let deletedRecords = 0;
+  if (parsed.length) {
+    const insertRecordSql = `
+      INSERT OR IGNORE INTO token_records (${TOKEN_RECORD_COLUMNS.join(', ')})
+      VALUES (${TOKEN_RECORD_COLUMNS.map(() => '?').join(', ')})
+    `;
+    const insertRecordStmt = db.prepare(insertRecordSql);
+    const deleteFileRecordsStmt = db.prepare('DELETE FROM token_records WHERE session_file = ?');
+    const upsertFileStmt = db.prepare(`
+      INSERT INTO session_files (
+        file_path,
+        file_size,
+        mtime_ms,
+        scanned_at_ms,
+        session_id,
+        last_error,
+        scanned_lines,
+        malformed_lines,
+        token_events,
+        parsed_records
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(file_path) DO UPDATE SET
+        file_size = excluded.file_size,
+        mtime_ms = excluded.mtime_ms,
+        scanned_at_ms = excluded.scanned_at_ms,
+        session_id = excluded.session_id,
+        last_error = excluded.last_error,
+        scanned_lines = excluded.scanned_lines,
+        malformed_lines = excluded.malformed_lines,
+        token_events = excluded.token_events,
+        parsed_records = excluded.parsed_records
+    `);
+
+    let inTransaction = false;
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      inTransaction = true;
+      for (const item of parsed) {
+        if (item.known && Number(item.stat.size) < Number(item.known.file_size)) {
+          const result = deleteFileRecordsStmt.run(item.file);
+          deletedRecords += Number(result?.changes || 0);
+        }
+        if (item.error) {
+          upsertFileStmt.run(
+            item.file,
+            item.stat.size,
+            item.stat.mtimeMs,
+            startedAt,
+            null,
+            item.error?.message || String(item.error),
+            0,
+            0,
+            0,
+            0
+          );
+          continue;
+        }
+        for (const record of item.parsed.records) {
+          const result = insertRecordStmt.run(...TOKEN_RECORD_COLUMNS.map((column) => sqliteValue(record[column])));
+          insertedRecords += Number(result?.changes || 0);
+        }
+        upsertFileStmt.run(
+          item.file,
+          item.stat.size,
+          item.stat.mtimeMs,
+          startedAt,
+          item.parsed.session.id,
+          null,
+          item.parsed.diagnostics.scanned_lines,
+          item.parsed.diagnostics.malformed_lines,
+          item.parsed.diagnostics.token_events,
+          item.parsed.diagnostics.parsed_records
+        );
+      }
+      db.exec('COMMIT');
+      inTransaction = false;
+    } catch (error) {
+      if (inTransaction) db.exec('ROLLBACK');
+      throw error;
+    }
+  }
+
+  if (insertedRecords || deletedRecords) cache.clear();
+  return {
+    ...indexedDiagnostics(files.length),
+    session_scanned_files: changed.length,
+    local_db_ingest_mode: 'on_demand_changed_session_files',
+    local_db_last_ingest_ms: startedAt,
+    local_db_changed_files: changed.length,
+    local_db_unchanged_files: Math.max(0, files.length - changed.length - statErrors),
+    local_db_inserted_records: insertedRecords,
+    local_db_deleted_records: deletedRecords,
+    local_db_parse_errors: parseErrors,
+    local_db_stat_errors: statErrors
+  };
+}
+
+function indexedDiagnostics(sessionFilesSeen) {
+  const fileStats = db.prepare(`
+    SELECT
+      COUNT(*) AS indexed_files,
+      COALESCE(SUM(scanned_lines), 0) AS scanned_lines,
+      COALESCE(SUM(malformed_lines), 0) AS malformed_lines,
+      COALESCE(SUM(token_events), 0) AS token_events,
+      COALESCE(SUM(parsed_records), 0) AS parsed_records
+    FROM session_files
+  `).get() || {};
+  const recordStats = db.prepare('SELECT COUNT(*) AS records FROM token_records').get() || {};
+  const indexedRecords = Number(recordStats.records || 0);
+  const parsedRecords = Number(fileStats.parsed_records || 0);
+  return {
+    sessions_dir: SESSIONS_DIR,
+    local_db_file: DB_FILE,
+    local_db_indexed_files: Number(fileStats.indexed_files || 0),
+    local_db_records: indexedRecords,
+    session_files: Number(sessionFilesSeen || 0),
+    session_scanned_files: 0,
+    session_metadata_scanned_lines: Number(fileStats.scanned_lines || 0),
+    malformed_session_lines: Number(fileStats.malformed_lines || 0),
+    session_token_count_events: Number(fileStats.token_events || 0),
+    session_token_count_duplicate_events: Math.max(0, parsedRecords - indexedRecords),
+    session_token_count_dedupe_strategy: 'session_id + last_token_usage_tuple + total_token_usage_snapshot_tuple'
+  };
+}
+
+function totalUsageSnapshotFromRow(row) {
+  if (row.total_tokens_snapshot == null) return null;
+  return {
+    input_tokens: row.total_input_tokens_snapshot ?? 0,
+    cached_input_tokens: row.total_cached_input_tokens_snapshot ?? 0,
+    output_tokens: row.total_output_tokens_snapshot ?? 0,
+    reasoning_output_tokens: row.total_reasoning_output_tokens_snapshot ?? 0,
+    total_tokens: row.total_tokens_snapshot ?? 0
+  };
+}
+
+function rowToRequest(row) {
+  const usage = {
+    input_tokens: row.input_tokens ?? 0,
+    cached_input_tokens: row.cached_input_tokens ?? 0,
+    output_tokens: row.output_tokens ?? 0,
+    reasoning_output_tokens: row.reasoning_output_tokens ?? 0,
+    total_tokens: row.total_tokens ?? 0
+  };
+  const status = normalizeRecordStatus(row.status, row.error_reason);
+  const costEstimate = estimateCost(usage, row.model);
+  return {
+    id: row.record_id,
+    record_id: row.record_id,
+    terminal_event_type: row.terminal_event_type || (status === 'failed' ? 'session.error' : 'session.token_count'),
+    created_ms: null,
+    completed_ms: row.ms,
+    response_timestamp_ms: row.ms,
+    response_timestamp_source: 'codex_session_token_count_event_timestamp',
+    duration_ms: null,
+    duration_ms_estimate: row.request_duration_ms_estimate,
+    duration_basis: row.request_duration_ms_estimate == null ? null : row.request_duration_basis,
+    request_started_ms_estimate: row.request_started_ms_estimate,
+    request_duration_ms_estimate: row.request_duration_ms_estimate,
+    request_duration_basis: row.request_duration_basis,
+    first_output_ms_estimate: row.first_output_ms_estimate,
+    first_output_event_ms: row.first_output_event_ms,
+    first_output_event_type: row.first_output_event_type,
+    first_output_basis: row.first_output_basis,
+    turn_id: row.turn_id,
+    turn_sequence: row.turn_sequence,
+    turn_started_ms: row.turn_started_ms,
+    turn_completed_ms: row.turn_completed_ms,
+    turn_elapsed_ms_estimate: row.turn_elapsed_ms_estimate,
+    turn_duration_ms_estimate: row.turn_duration_ms_estimate,
+    response_item_count: row.response_item_count,
+    stream_observed: row.stream_observed == null ? null : Boolean(row.stream_observed),
+    stream_observed_basis: row.stream_observed_basis,
+    model: row.model || '',
+    effort: row.effort || '',
+    status,
+    error_reason: row.error_reason || null,
+    usage,
+    usage_source: 'codex_session_last_token_usage',
+    cost_estimate: costEstimate,
+    total_usage_snapshot: totalUsageSnapshotFromRow(row),
+    model_context_window: row.model_context_window,
+    conversation_id: row.session_id,
+    originator: row.originator || null,
+    source_quality: 'codex_session_token_count',
+    source_context: {
+      data_source: 'codex_session_token_count',
+      conversation_id: row.session_id,
+      originator: row.originator || '',
+      cwd: row.cwd || '',
+      session_source: row.source || '',
+      thread_source: row.thread_source || '',
+      model_provider: row.model_provider || '',
+      session_file: row.session_file || '',
+      source_quality: 'codex_session_token_count'
+    }
+  };
+}
+
+function queryTokenRecords(startMs, endMs) {
+  return db
+    .prepare('SELECT * FROM token_records WHERE ms >= ? AND ms <= ? ORDER BY ms DESC')
+    .all(startMs, endMs)
+    .map(rowToRequest);
+}
+
+function summarizeCost(requests) {
+  let amountUsd = 0;
+  let pricedRecords = 0;
+  let unpricedRecords = 0;
+  const byModel = new Map();
+  for (const request of requests) {
+    const cost = request.cost_estimate;
+    const hasTokens = request.usage.total_tokens > 0 || request.usage.input_tokens > 0 || request.usage.output_tokens > 0;
+    if (cost?.known && Number.isFinite(cost.amount_usd)) {
+      amountUsd += cost.amount_usd;
+      pricedRecords++;
+      const key = cost.model_key || request.model || 'unknown';
+      const item = byModel.get(key) || { model: key, records: 0, amount_usd: 0 };
+      item.records++;
+      item.amount_usd += cost.amount_usd;
+      byModel.set(key, item);
+    } else if (hasTokens) {
+      unpricedRecords++;
+    }
+  }
+  return {
+    currency: pricingConfig.currency || 'USD',
+    amount_usd: amountUsd,
+    priced_records: pricedRecords,
+    unpriced_records: unpricedRecords,
+    source: pricingConfig.source || '',
+    updated_at: pricingConfig.updated_at || '',
+    by_model: [...byModel.values()].sort((a, b) => b.amount_usd - a.amount_usd)
+  };
+}
+
+function cacheHitRate(usage) {
+  if (!usage.input_tokens) return null;
+  return usage.cached_input_tokens / usage.input_tokens;
+}
+
+function countBy(items, getKey) {
+  const map = new Map();
+  for (const item of items) {
+    const key = getKey(item) || 'unknown';
+    map.set(key, (map.get(key) || 0) + 1);
+  }
+  return [...map.entries()]
+    .map(([key, count]) => ({ key, count }))
+    .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
+}
+
+function buildData(startMs, endMs, bucket, pagination) {
+  const diagnostics = ingestChangedSessionFiles();
+  const requests = queryTokenRecords(startMs, endMs);
+
   const requestUsage = requests.reduce((sum, req) => addUsage(sum, req.usage), emptyUsage());
-  const knownCosts = requests.filter((r) => r.cost?.usd != null);
-  const totalCost = knownCosts.reduce((sum, r) => sum + r.cost.usd, 0);
-  const durations = requests.map((r) => r.duration_ms).filter((v) => Number.isFinite(v) && v > 0);
-  const firstTokens = requests.map((r) => r.first_token_ms_estimate).filter((v) => Number.isFinite(v) && v >= 0);
-
-  const modelMap = new Map();
-  for (const req of requests) {
-    const key = req.model || 'unknown';
-    const row = modelMap.get(key) || { model: key, requests: 0, usage: emptyUsage(), cost_usd: 0, cost_known: 0 };
-    row.requests++;
-    row.usage = addUsage(row.usage, req.usage);
-    if (req.cost?.usd != null) {
-      row.cost_usd += req.cost.usd;
-      row.cost_known++;
-    }
-    modelMap.set(key, row);
-  }
+  const costSummary = summarizeCost(requests);
+  const durationEstimates = requests.map((r) => r.duration_ms_estimate).filter((v) => Number.isFinite(v) && v > 0);
+  const firstOutputEstimates = requests.map((r) => r.first_output_ms_estimate).filter((v) => Number.isFinite(v) && v >= 0);
+  const turnDurations = requests.map((r) => r.turn_duration_ms_estimate).filter((v) => Number.isFinite(v) && v > 0);
+  const streamKnownRecords = requests.filter((r) => Number.isFinite(r.response_item_count) && r.response_item_count > 0).length;
+  const streamObservedRecords = requests.filter((r) => r.stream_observed === true).length;
+  const totalRecords = requests.length;
+  const pageSize = pagination.pageSize;
+  const totalPages = Math.max(1, Math.ceil(totalRecords / pageSize));
+  const page = Math.min(Math.max(1, pagination.page), totalPages);
+  const offset = (page - 1) * pageSize;
+  const pageRequests = requests.slice(offset, offset + pageSize);
 
   return {
     generated_at: Date.now(),
     range: { start_ms: startMs, end_ms: endMs, bucket },
     codex_home: CODEX_HOME,
-    pricing: {
-      currency: pricing.currency || 'USD',
-      unit: pricing.unit,
-      source: pricing.source,
-      source_checked_at: pricing.source_checked_at,
-      notes: pricing.notes || [],
-      configured_models: Object.keys(pricing.models || {})
-    },
     diagnostics: {
-      ...sessionData.diagnostics,
-      sqlite_available: Boolean(DatabaseSync),
-      sqlite_exists: fs.existsSync(LOG_DB),
-      raw_sse_requests: rawRequests.length,
-      otel_completions: otelRequests.length,
-      request_records: requests.length
+      ...diagnostics,
+      request_records: requests.length,
+      session_token_count_records: requests.length
     },
-    latest_rate_limit: sessionData.latestRateLimit,
     summary: {
-      sessions: filteredSessions.length,
-      sessions_without_token: filteredSessions.filter((s) => s.token_events === 0).length,
-      requests: requests.length,
-      session_cumulative_usage: sessionUsage,
-      session_usage: sessionUsage,
+      request_records: requests.length,
+      session_token_count_records: requests.length,
       request_usage: requestUsage,
-      known_cost_usd: totalCost,
-      known_cost_requests: knownCosts.length,
-      average_latency_ms: durations.length ? durations.reduce((a, b) => a + b, 0) / durations.length : null,
-      average_first_token_ms_estimate: firstTokens.length ? firstTokens.reduce((a, b) => a + b, 0) / firstTokens.length : null,
-      source_ip_available: false
+      cache_hit_rate: cacheHitRate(requestUsage),
+      estimated_cost: costSummary,
+      average_request_duration_ms_estimate: durationEstimates.length
+        ? durationEstimates.reduce((a, b) => a + b, 0) / durationEstimates.length
+        : null,
+      average_turn_elapsed_ms_estimate: durationEstimates.length
+        ? durationEstimates.reduce((a, b) => a + b, 0) / durationEstimates.length
+        : null,
+      average_first_output_ms_estimate: firstOutputEstimates.length
+        ? firstOutputEstimates.reduce((a, b) => a + b, 0) / firstOutputEstimates.length
+        : null,
+      average_turn_duration_ms_estimate: turnDurations.length
+        ? turnDurations.reduce((a, b) => a + b, 0) / turnDurations.length
+        : null,
+      stream_known_records: streamKnownRecords,
+      stream_observed_records: streamObservedRecords
     },
+    buckets: summarizeBuckets(requests, bucket),
     data_quality: {
-      primary_usage: 'request_completed_window',
-      request_usage_sources: {
-        raw_sse: requests.filter((r) => r.merge_quality === 'raw_sse').length,
-        raw_sse_plus_otel: requests.filter((r) => r.merge_quality === 'raw_sse+otel').length,
-        otel_only: requests.filter((r) => r.merge_quality === 'otel_only').length
-      },
-      session_usage: 'session_cumulative_diagnostic_only',
-      first_token_ms: 'raw_sse_log_estimate_when_single_active_response',
-      source_ip: 'unavailable'
+      primary_records: 'codex_session_token_count_events',
+      token_usage: 'codex_session_last_token_usage',
+      source_context: 'codex_session_metadata_and_turn_context',
+      duration_ms_estimate: 'local_observed_model_request_start_to_token_count',
+      first_output_ms_estimate: 'local_observed_model_request_start_to_first_response_item',
+      stream_observed: 'local_response_item_count_before_token_count_not_official_stream_flag',
+      cost_estimate: 'local_estimate_from_configured_official_per_1m_token_rates',
+      turn_duration_ms_estimate: 'local_session_task_started_to_task_complete',
+      excluded_sources: ['logs_2.sqlite', 'raw_sse', 'codex_otel']
     },
-    buckets: {
-      sessions: summarizeByBuckets(filteredSessions, bucket),
-      requests: summarizeByBuckets(requests, bucket)
+    counts: {
+      status: countBy(requests, (req) => req.status),
+      model: countBy(requests, (req) => req.model),
+      originator: countBy(requests, (req) => req.originator)
     },
-    models: [...modelMap.values()].sort((a, b) => b.usage.total_tokens - a.usage.total_tokens),
-    sessions: filteredSessions.slice(0, Math.min(limit, 1000)),
-    requests: requests.slice(0, Math.min(limit, 1000))
+    pagination: {
+      page,
+      page_size: pageSize,
+      total_records: totalRecords,
+      total_pages: totalPages
+    },
+    requests: pageRequests
   };
 }
 
 function parseRange(searchParams) {
   const now = Date.now();
-  const end = Number(searchParams.get('end_ms')) || timestampMs(searchParams.get('end')) || now;
-  let start = Number(searchParams.get('start_ms')) || timestampMs(searchParams.get('start'));
-  if (!start) {
+  const endMsParam = searchParams.get('end_ms');
+  const startMsParam = searchParams.get('start_ms');
+  let end = endMsParam != null ? Number(endMsParam) : (timestampMs(searchParams.get('end')) || now);
+  let start = startMsParam != null ? Number(startMsParam) : timestampMs(searchParams.get('start'));
+  if (!Number.isFinite(end)) end = now;
+  if (start == null || !Number.isFinite(start)) {
     const days = Number(searchParams.get('days') || 7);
     start = days <= 0 ? 0 : end - days * 24 * 60 * 60 * 1000;
   }
@@ -801,7 +1057,8 @@ function parseRange(searchParams) {
     startMs: Math.max(0, start),
     endMs: Math.max(start, end),
     bucket: ['hour', 'day', 'week'].includes(searchParams.get('bucket')) ? searchParams.get('bucket') : 'day',
-    limit: Number(searchParams.get('limit') || 500)
+    page: Math.max(1, Number(searchParams.get('page') || 1)),
+    pageSize: Math.min(100, Math.max(5, Number(searchParams.get('page_size') || 7)))
   };
 }
 
@@ -875,14 +1132,17 @@ const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
   if (url.pathname === '/api/data') {
     const range = parseRange(url.searchParams);
-    const cacheKey = `${range.startMs}:${range.endMs}:${range.bucket}:${range.limit}`;
+    const cacheKey = `${range.startMs}:${range.endMs}:${range.bucket}:${range.page}:${range.pageSize}`;
     const cached = cache.get(cacheKey);
     if (cached && Date.now() - cached.ts < CACHE_TTL_MS) {
       sendJson(res, 200, cached.data);
       return;
     }
     try {
-      const data = buildData(range.startMs, range.endMs, range.bucket, range.limit);
+      const data = buildData(range.startMs, range.endMs, range.bucket, {
+        page: range.page,
+        pageSize: range.pageSize
+      });
       cache.set(cacheKey, { ts: Date.now(), data });
       sendJson(res, 200, data);
     } catch (error) {
@@ -899,8 +1159,9 @@ const server = http.createServer((req, res) => {
       pid: process.pid,
       codex_home: CODEX_HOME,
       sessions_dir_exists: fs.existsSync(SESSIONS_DIR),
-      log_db_exists: fs.existsSync(LOG_DB),
-      sqlite_available: Boolean(DatabaseSync)
+      data_source: 'codex_session_jsonl_to_local_sqlite',
+      local_db_file: DB_FILE,
+      local_db_ingest_mode: 'on_demand_changed_session_files'
     });
     return;
   }
