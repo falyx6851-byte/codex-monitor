@@ -307,6 +307,7 @@ data/
 - 没有官方单请求 HTTP status，除非 session JSONL 自己记录。
 - 没有官方 TTFT。
 - 没有请求 IP。
+- 没有历史请求 Fast 开关，除非 session JSONL 为该请求写出 `service_tier` / `serviceTier`。当前 `config.toml` 只代表当前默认配置，不用于反推历史请求。
 - 不读取 ChatGPT OAuth 额度百分比。
 - 不接 OpenAI 组织级 Usage / Costs API。
 - 不读取 `logs_2.sqlite`。

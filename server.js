@@ -122,6 +122,30 @@ function normalizeRecordStatus(status, errorReason) {
   return 'success';
 }
 
+function normalizeServiceTier(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim().toLowerCase();
+}
+
+function extractServiceTier(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const candidates = [
+    ['payload.service_tier', payload.service_tier],
+    ['payload.serviceTier', payload.serviceTier],
+    ['payload.info.service_tier', payload.info?.service_tier],
+    ['payload.info.serviceTier', payload.info?.serviceTier],
+    ['payload.request.service_tier', payload.request?.service_tier],
+    ['payload.request.serviceTier', payload.request?.serviceTier],
+    ['payload.response.service_tier', payload.response?.service_tier],
+    ['payload.response.serviceTier', payload.response?.serviceTier]
+  ];
+  for (const [source, value] of candidates) {
+    const tier = normalizeServiceTier(value);
+    if (tier) return { tier, source };
+  }
+  return null;
+}
+
 function isPartialUsageWithoutBreakdown(usage) {
   return (
     usage.total_tokens > 0 &&
@@ -274,6 +298,8 @@ const TOKEN_RECORD_COLUMNS = [
   'cli_version',
   'model',
   'effort',
+  'service_tier',
+  'service_tier_source',
   'status',
   'error_reason',
   'input_tokens',
@@ -341,6 +367,8 @@ function initDb() {
       cli_version TEXT,
       model TEXT,
       effort TEXT,
+      service_tier TEXT,
+      service_tier_source TEXT,
       status TEXT,
       error_reason TEXT,
       input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -380,6 +408,8 @@ function initDb() {
   `);
   ensureColumn(database, 'token_records', 'terminal_event_type', "TEXT NOT NULL DEFAULT 'session.token_count'");
   ensureColumn(database, 'token_records', 'error_reason', 'TEXT');
+  ensureColumn(database, 'token_records', 'service_tier', 'TEXT');
+  ensureColumn(database, 'token_records', 'service_tier_source', 'TEXT');
   database.prepare(`
     UPDATE token_records
     SET
@@ -436,6 +466,8 @@ function parseSessionFile(file, stat) {
 
   let currentModel = '';
   let currentEffort = '';
+  let currentServiceTier = '';
+  let currentServiceTierSource = '';
   let currentTurn = null;
   let turnSequence = 0;
   let pendingModelStartMs = null;
@@ -468,6 +500,11 @@ function parseSessionFile(file, stat) {
       if (session.end_ms == null || ms > session.end_ms) session.end_ms = ms;
     }
     const payload = row.payload || {};
+    const serviceTierEvidence = extractServiceTier(payload);
+    if (serviceTierEvidence) {
+      currentServiceTier = serviceTierEvidence.tier;
+      currentServiceTierSource = `${row.type}.${serviceTierEvidence.source}`;
+    }
     if (row.type === 'session_meta') {
       Object.assign(session, {
         id: payload.id || session.id,
@@ -552,6 +589,8 @@ function parseSessionFile(file, stat) {
         total_usage_snapshot: null,
         model: currentModel || session.model || '',
         effort: currentEffort || '',
+        service_tier: currentServiceTier || '',
+        service_tier_source: currentServiceTierSource || '',
         model_context_window: null,
         turn_id: currentTurn?.id || null,
         turn_sequence: currentTurn?.sequence ?? null,
@@ -632,6 +671,8 @@ function parseSessionFile(file, stat) {
         total_usage_snapshot: totalUsage.total_tokens > 0 ? totalUsage : null,
         model: currentModel || session.model || '',
         effort: currentEffort || '',
+        service_tier: currentServiceTier || '',
+        service_tier_source: currentServiceTierSource || '',
         model_context_window: payload.info?.model_context_window ?? null,
         turn_id: currentTurn?.id || null,
         turn_sequence: currentTurn?.sequence ?? null,
@@ -682,6 +723,8 @@ function parseSessionFile(file, stat) {
       cli_version: session.cli_version || '',
       model: item.model || session.model || '',
       effort: item.effort || '',
+      service_tier: item.service_tier || '',
+      service_tier_source: item.service_tier_source || '',
       status: normalizeRecordStatus(item.status, item.error_reason),
       error_reason: item.error_reason || null,
       input_tokens: item.usage.input_tokens,
@@ -934,6 +977,8 @@ function rowToRequest(row) {
     stream_observed_basis: row.stream_observed_basis,
     model: row.model || '',
     effort: row.effort || '',
+    service_tier: row.service_tier || '',
+    service_tier_source: row.service_tier_source || '',
     status,
     error_reason: row.error_reason || null,
     usage,
@@ -1025,6 +1070,7 @@ function buildData(startMs, endMs, bucket, pagination) {
   const turnDurations = requests.map((r) => r.turn_duration_ms_estimate).filter((v) => Number.isFinite(v) && v > 0);
   const streamKnownRecords = requests.filter((r) => Number.isFinite(r.response_item_count) && r.response_item_count > 0).length;
   const streamObservedRecords = requests.filter((r) => r.stream_observed === true).length;
+  const serviceTierKnownRecords = requests.filter((r) => r.service_tier).length;
   const totalRecords = requests.length;
   const pageSize = pagination.pageSize;
   const totalPages = Math.max(1, Math.ceil(totalRecords / pageSize));
@@ -1060,7 +1106,8 @@ function buildData(startMs, endMs, bucket, pagination) {
         ? turnDurations.reduce((a, b) => a + b, 0) / turnDurations.length
         : null,
       stream_known_records: streamKnownRecords,
-      stream_observed_records: streamObservedRecords
+      stream_observed_records: streamObservedRecords,
+      service_tier_known_records: serviceTierKnownRecords
     },
     buckets: summarizeBuckets(requests, bucket),
     data_quality: {
@@ -1070,6 +1117,7 @@ function buildData(startMs, endMs, bucket, pagination) {
       duration_ms_estimate: 'local_observed_model_request_start_to_token_count',
       first_output_ms_estimate: 'local_observed_model_request_start_to_first_response_item',
       stream_observed: 'local_response_item_count_before_token_count_not_official_stream_flag',
+      service_tier: 'codex_session_request_service_tier_when_present_no_current_config_backfill',
       cost_estimate: 'local_estimate_from_configured_official_per_1m_token_rates',
       turn_duration_ms_estimate: 'local_session_task_started_to_task_complete',
       excluded_sources: ['logs_2.sqlite', 'raw_sse', 'codex_otel']
@@ -1077,6 +1125,7 @@ function buildData(startMs, endMs, bucket, pagination) {
     counts: {
       status: countBy(requests, (req) => req.status),
       model: countBy(requests, (req) => req.model),
+      service_tier: countBy(requests, (req) => req.service_tier),
       originator: countBy(requests, (req) => req.originator)
     },
     pagination: {

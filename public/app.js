@@ -16,6 +16,7 @@ const els = {
   export: document.getElementById('exportBtn'),
   metrics: document.getElementById('overview'),
   requestRows: document.getElementById('requestRows'),
+  serviceTierHeader: document.getElementById('serviceTierHeader'),
   requestCount: document.getElementById('requestCount'),
   prevPage: document.getElementById('prevPageBtn'),
   nextPage: document.getElementById('nextPageBtn'),
@@ -215,6 +216,24 @@ function statusPill(record) {
   return `<span class="pill ${failed ? 'bad' : 'ok'}" title="${escapeHtml(title)}">${escapeHtml(label)}</span>`;
 }
 
+function serviceTierPill(record) {
+  const tier = String(record.service_tier || '').trim().toLowerCase();
+  if (!tier) return '<span class="muted">未知</span>';
+  const labels = {
+    fast: 'Fast',
+    priority: 'Fast',
+    default: '标准',
+    standard: '标准',
+    flex: 'Flex'
+  };
+  const label = labels[tier] || tier;
+  const klass = tier === 'fast' || tier === 'priority' ? 'warn' : 'muted-pill';
+  const titleParts = [`请求级 service_tier=${tier}`];
+  if (tier === 'priority') titleParts.push('Codex Fast mode 使用 priority processing');
+  if (record.service_tier_source) titleParts.push(`来源：${record.service_tier_source}`);
+  return `<span class="pill ${klass}" title="${escapeHtml(titleParts.join('；'))}">${escapeHtml(label)}</span>`;
+}
+
 function displayRecordId(recordId) {
   return String(recordId || '').replace(/^session-token-/, '');
 }
@@ -228,6 +247,8 @@ function sourceLabel(context = {}) {
 function renderRequests() {
   const rows = filteredRequests();
   const page = state.data?.pagination || { page: 1, total_pages: 1, total_records: rows.length, page_size: 7 };
+  const showServiceTier = Number(state.data?.summary?.service_tier_known_records || 0) > 0;
+  els.serviceTierHeader.hidden = !showServiceTier;
   els.requestCount.textContent = `${fmtNum(rows.length)} 当前页 / ${fmtNum(page.total_records)} 总记录`;
   els.pageInfo.textContent = `${fmtNum(page.page)} / ${fmtNum(page.total_pages)}`;
   els.prevPage.disabled = page.page <= 1;
@@ -244,6 +265,8 @@ function renderRequests() {
       token_usage_normalized: r.usage,
       token_usage_source: r.usage_source,
       cost_estimate: r.cost_estimate,
+      service_tier: r.service_tier,
+      service_tier_source: r.service_tier_source,
       status: r.status,
       error_reason: r.error_reason,
       session_total_usage_snapshot: r.total_usage_snapshot,
@@ -277,6 +300,7 @@ function renderRequests() {
       <td class="mono">${fmtDate(r.completed_ms)}</td>
       <td class="mono">${escapeHtml(clampText(displayId || '—', 24))}</td>
       <td><span class="pill">${escapeHtml(r.model || 'unknown')}</span></td>
+      ${showServiceTier ? `<td>${serviceTierPill(r)}</td>` : ''}
       <td>${statusPill(r)}</td>
       <td class="num">${fmtCompact(r.usage.input_tokens)}</td>
       <td class="num">${fmtCompact(r.usage.cached_input_tokens)}</td>
@@ -288,7 +312,7 @@ function renderRequests() {
       <td class="preview"><span title="${escapeHtml(r.source_context?.cwd || '')}">${escapeHtml(clampText(source, 80))}</span></td>
       <td class="preview"><button type="button" data-detail="${escapeHtml(detail)}">查看</button></td>
     </tr>`;
-  }).join('') || '<tr><td colspan="13" class="muted">暂无请求记录。</td></tr>';
+  }).join('') || `<tr><td colspan="${showServiceTier ? 14 : 13}" class="muted">暂无请求记录。</td></tr>`;
 }
 
 function bindDetailButtons() {

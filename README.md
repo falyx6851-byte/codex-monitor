@@ -310,6 +310,7 @@ data/
 - No official per-request HTTP status unless the session JSONL contains it.
 - No official TTFT.
 - No request IP.
+- No historical per-request Fast state unless the session JSONL writes `service_tier` / `serviceTier` for that request. The current `config.toml` only describes the current default and is not used to backfill historical requests.
 - No ChatGPT OAuth quota percentage.
 - No OpenAI organization usage/cost API integration.
 - No `logs_2.sqlite` ingestion.
