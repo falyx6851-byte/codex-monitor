@@ -331,8 +331,8 @@ function bindDetailButtons() {
 function chartContext(canvas) {
   const rect = canvas.getBoundingClientRect();
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const width = Math.max(280, Math.round(rect.width));
-  const height = Math.max(140, Math.round(rect.height));
+  const width = Math.max(1, Math.round(rect.width));
+  const height = Math.max(1, Math.round(rect.height));
   canvas.width = Math.round(width * dpr);
   canvas.height = Math.round(height * dpr);
   const ctx = canvas.getContext('2d');

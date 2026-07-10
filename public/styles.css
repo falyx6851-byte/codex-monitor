@@ -457,8 +457,15 @@ td.num, th.num { text-align: right; }
 .legend .green-dot::before { background: var(--green); }
 .legend .cyan-dot::before { background: var(--cyan); }
 .legend .red-dot::before { background: var(--red); }
-.model-share-layout { display: grid; grid-template-columns: 38% minmax(0, 1fr); align-items: center; height: calc(100% - 43px); }
-.model-share-layout canvas { display: block; width: 100%; height: 132px; }
+.model-share-layout { display: grid; grid-template-columns: 132px minmax(0, 1fr); align-items: center; height: calc(100% - 43px); }
+.model-share-layout canvas {
+  display: block;
+  width: 132px;
+  height: 132px;
+  max-width: 100%;
+  justify-self: center;
+  aspect-ratio: 1;
+}
 .model-share { display: grid; gap: 9px; }
 .model-row { display: grid; grid-template-columns: 9px minmax(80px, 1fr) auto; align-items: center; gap: 8px; min-width: 0; }
 .model-swatch { width: 9px; height: 9px; border-radius: 50%; }
