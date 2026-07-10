@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="light">
     <title>Codex Monitor</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/styles.css?v=3">
   </head>
   <body>
     <header class="masthead">
@@ -14,7 +14,7 @@
         <div class="brand-mark" aria-hidden="true">C/</div>
         <div class="brand-copy">
           <h1>Codex Monitor</h1>
-          <span class="brand-kicker">LOCAL SESSION TELEMETRY</span>
+          <span class="brand-kicker">本地监测</span>
         </div>
       </div>
 
@@ -32,8 +32,8 @@
       </div>
 
       <div class="top-actions">
-        <button id="exportBtn" class="button quiet" type="button">导出 JSON</button>
-        <button id="refreshBtn" class="button primary" type="button">刷新数据</button>
+        <button id="exportBtn" class="button quiet" type="button"><span aria-hidden="true">↥</span> 导出 JSON</button>
+        <button id="refreshBtn" class="button primary" type="button"><span aria-hidden="true">↻</span> 刷新数据</button>
       </div>
     </header>
 
@@ -44,7 +44,7 @@
           <button class="chip active" data-days="1" type="button">今日</button>
           <button class="chip" data-days="7" type="button">7 天</button>
           <button class="chip" data-days="30" type="button">30 天</button>
-          <button class="chip" data-days="0" type="button">全部</button>
+          <button class="chip" data-days="custom" type="button">自定义</button>
         </div>
       </div>
 
@@ -129,48 +129,59 @@
       <section id="analyticsView" class="view analytics-view" aria-label="周期统计" hidden>
         <div class="analytics-scroll">
           <div class="analytics-grid">
-            <article class="chart-panel span-2">
+            <article class="chart-panel">
               <div class="chart-head">
-                <div><span class="eyebrow">TOKEN VOLUME</span><h2>Token 消耗趋势</h2></div>
-                <strong id="tokenTrendTotal" class="chart-total">—</strong>
+                <div><h2>Token 消耗趋势</h2><div class="legend"><span class="green-dot">总 Token</span></div></div>
+                <div class="chart-stat"><span>总计</span><strong id="tokenTrendTotal">—</strong></div>
               </div>
               <canvas id="tokenTrendChart" aria-label="Token 消耗趋势图"></canvas>
             </article>
 
             <article class="chart-panel">
               <div class="chart-head">
-                <div><span class="eyebrow">RELIABILITY</span><h2>请求成功率</h2></div>
-                <strong id="successRateValue" class="chart-total success-text">—</strong>
-              </div>
-              <canvas id="successTrendChart" aria-label="请求成功率趋势图"></canvas>
-            </article>
-
-            <article class="chart-panel">
-              <div class="chart-head">
-                <div><span class="eyebrow">TOKEN MIX</span><h2>输入 / 缓存 / 输出</h2></div>
+                <div><h2>输入 / 缓存 / 输出 Token 分布</h2><div class="legend"><span class="blue-dot">输入 Token</span><span class="green-dot">缓存 Token</span><span class="cyan-dot">输出 Token</span></div></div>
               </div>
               <canvas id="tokenMixChart" aria-label="Token 构成趋势图"></canvas>
             </article>
 
             <article class="chart-panel">
               <div class="chart-head">
-                <div><span class="eyebrow">MODEL SHARE</span><h2>模型使用占比</h2></div>
+                <div><h2>请求成功率趋势</h2><div class="legend"><span class="green-dot">成功率</span><span class="red-dot">失败率</span></div></div>
+                <div class="chart-stat success-text"><span>成功率</span><strong id="successRateValue">—</strong></div>
               </div>
-              <div id="modelShare" class="model-share"></div>
+              <canvas id="successTrendChart" aria-label="请求成功率趋势图"></canvas>
             </article>
 
             <article class="chart-panel">
               <div class="chart-head">
-                <div><span class="eyebrow">COST & LATENCY</span><h2>费用与响应耗时</h2></div>
-                <div class="legend"><span class="amber-dot">费用</span><span class="blue-dot">耗时</span></div>
+                <div><h2>模型使用占比（按请求数）</h2></div>
               </div>
-              <canvas id="costLatencyChart" aria-label="费用与响应耗时趋势图"></canvas>
+              <div class="model-share-layout">
+                <canvas id="modelShareChart" aria-label="模型使用占比图"></canvas>
+                <div id="modelShare" class="model-share"></div>
+              </div>
+            </article>
+
+            <article class="chart-panel">
+              <div class="chart-head">
+                <div><h2>估算金额趋势（USD）</h2></div>
+                <div class="chart-stat"><span>总计</span><strong id="costTrendTotal">—</strong></div>
+              </div>
+              <canvas id="costTrendChart" aria-label="估算金额趋势图"></canvas>
+            </article>
+
+            <article class="chart-panel">
+              <div class="chart-head">
+                <div><h2>平均响应耗时趋势（秒）</h2></div>
+                <div class="chart-stat blue-text"><span>均值</span><strong id="latencyTrendTotal">—</strong><span>首输出 <b id="firstOutputTotal">—</b></span></div>
+              </div>
+              <canvas id="latencyTrendChart" aria-label="平均响应耗时趋势图"></canvas>
             </article>
           </div>
 
           <section class="period-table-panel" aria-labelledby="periodTableTitle">
             <div class="period-table-head">
-              <div><span class="eyebrow">PERIOD LEDGER</span><h2 id="periodTableTitle">周期明细</h2></div>
+              <div><h2 id="periodTableTitle">周期明细</h2></div>
               <span id="periodCount" class="muted">0 个周期</span>
             </div>
             <div class="table-wrap period-table-wrap">
@@ -185,6 +196,12 @@
                 <tbody id="periodRows"></tbody>
               </table>
             </div>
+            <div class="period-pager" aria-label="周期明细分页">
+              <button id="periodPrevBtn" class="icon-button" type="button" title="上一页" aria-label="上一页">‹</button>
+              <div id="periodPages" class="period-pages"></div>
+              <button id="periodNextBtn" class="icon-button" type="button" title="下一页" aria-label="下一页">›</button>
+              <span class="period-page-size">5 条 / 页</span>
+            </div>
           </section>
         </div>
       </section>
@@ -198,6 +215,6 @@
       <div id="detailContent" class="detail-content"></div>
     </dialog>
 
-    <script src="/app.js"></script>
+    <script src="/app.js?v=3"></script>
   </body>
 </html>

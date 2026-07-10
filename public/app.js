@@ -4,6 +4,7 @@ const state = {
   data: null,
   activeDays: 1,
   page: 1,
+  periodPage: 1,
   autoEnd: true,
   view: location.hash === '#analytics' ? 'analytics' : 'requests',
   visibleRecords: []
@@ -29,6 +30,9 @@ const els = {
   pageInfo: document.getElementById('pageInfo'),
   periodRows: document.getElementById('periodRows'),
   periodCount: document.getElementById('periodCount'),
+  periodPrev: document.getElementById('periodPrevBtn'),
+  periodNext: document.getElementById('periodNextBtn'),
+  periodPages: document.getElementById('periodPages'),
   tokenTrendTotal: document.getElementById('tokenTrendTotal'),
   successRateValue: document.getElementById('successRateValue'),
   modelShare: document.getElementById('modelShare'),
@@ -167,11 +171,14 @@ async function loadData() {
   }
 }
 
-function metric(label, value, sub, accent, index) {
+function metric(label, value, sub, accent, index, icon) {
   return `<article class="metric ${accent}">
-    <div class="metric-head"><span class="label">${escapeHtml(label)}</span><span class="index">0${index}</span></div>
-    <div class="value">${escapeHtml(value)}</div>
-    <div class="sub">${escapeHtml(sub || '')}</div>
+    <span class="metric-icon" aria-hidden="true">${icon}</span>
+    <div class="metric-copy">
+      <div class="metric-head"><span class="label">${escapeHtml(label)}</span><span class="index">0${index}</span></div>
+      <div class="value">${escapeHtml(value)}</div>
+      <div class="sub">${escapeHtml(sub || '')}</div>
+    </div>
   </article>`;
 }
 
@@ -188,13 +195,13 @@ function renderMetrics(data) {
     ? `${fmtNum(cost.lower_bound_records)} 条缺缓存写入量`
     : `${fmtNum(cost.priced_records)} 条已计价`;
   els.metrics.innerHTML = [
-    metric('请求记录', fmtNum(data.summary.request_records), `成功 ${fmtNum(success)} · 失败 ${fmtNum(failed)}`, 'accent-green', 1),
-    metric('总 Token', fmtCompact(usage.total_tokens), '输入与输出合计', 'accent-cyan', 2),
-    metric('缓存命中率', fmtPercent(data.summary.cache_hit_rate), `${fmtCompact(usage.cached_input_tokens)} 缓存 Token`, 'accent-violet', 3),
-    metric('输出 Token', fmtCompact(usage.output_tokens), '请求输出合计', 'accent-blue', 4),
-    metric('估算金额', fmtMoney(cost.amount_usd), costSub, 'accent-amber', 5),
+    metric('请求记录', fmtNum(data.summary.request_records), `成功 ${fmtNum(success)} · 失败 ${fmtNum(failed)}`, 'accent-green', 1, '⌁'),
+    metric('总 Token', fmtCompact(usage.total_tokens), '输入 + 输出合计', 'accent-blue', 2, '▤'),
+    metric('缓存命中率', fmtPercent(data.summary.cache_hit_rate), `${fmtCompact(usage.cached_input_tokens)} 缓存 Token`, 'accent-green', 3, '◕'),
+    metric('输出 Token', fmtCompact(usage.output_tokens), '请求输出合计', 'accent-cyan', 4, '↑'),
+    metric('估算金额', fmtMoney(cost.amount_usd), costSub, 'accent-amber', 5, '$'),
     metric('平均响应耗时', fmtMs(data.summary.average_request_duration_ms_estimate),
-      `首输出 ${fmtMs(data.summary.average_first_output_ms_estimate)}`, 'accent-red', 6)
+      `首输出 ${fmtMs(data.summary.average_first_output_ms_estimate)}`, 'accent-red', 6, '◷')
   ].join('');
 }
 
@@ -419,66 +426,49 @@ function drawGroupedBars(canvas, labels, series) {
   });
 }
 
-function drawCostLatency(canvas, labels, costs, durations) {
+function drawDonutChart(canvas, rows, colors) {
   const { ctx, width, height } = chartContext(canvas);
-  const box = { left: 42, right: width - 42, top: 10, bottom: height - 24 };
-  const costMax = Math.max(1, ...costs);
-  const durationSeconds = durations.map((value) => Number.isFinite(value) ? value / 1000 : null);
-  const durationMax = Math.max(1, ...durationSeconds.filter(Number.isFinite));
-  ctx.strokeStyle = '#e1e6e2';
-  ctx.lineWidth = 1;
-  for (let i = 0; i <= 3; i++) {
-    const y = box.top + (box.bottom - box.top) * i / 3;
-    ctx.beginPath(); ctx.moveTo(box.left, y); ctx.lineTo(box.right, y); ctx.stroke();
-    ctx.fillStyle = '#a36308';
-    ctx.fillText(`$${(costMax * (1 - i / 3)).toFixed(1)}`, 1, y + 3);
-    ctx.fillStyle = '#2867b2';
-    ctx.fillText(`${Math.round(durationMax * (1 - i / 3))}s`, width - 35, y + 3);
-  }
-  const xAt = (index) => box.left + (box.right - box.left) * (labels.length <= 1 ? .5 : index / (labels.length - 1));
-  const drawSeries = (values, max, color, fill) => {
-    const points = values.map((value, index) => Number.isFinite(value) ? ({
-      x: xAt(index), y: box.bottom - (box.bottom - box.top) * value / max
-    }) : null);
-    const finitePoints = points.filter(Boolean);
-    if (fill && finitePoints.length > 1 && finitePoints.length === points.length) {
-      ctx.save(); ctx.globalAlpha = .08; ctx.fillStyle = color;
-      ctx.beginPath(); ctx.moveTo(points[0].x, box.bottom);
-      points.forEach((point) => ctx.lineTo(point.x, point.y));
-      ctx.lineTo(points.at(-1).x, box.bottom); ctx.closePath(); ctx.fill(); ctx.restore();
-    }
-    ctx.strokeStyle = color; ctx.lineWidth = 2;
-    let drawing = false;
+  const total = rows.reduce((sum, row) => sum + row.count, 0);
+  if (!total) return;
+  const cx = width / 2;
+  const cy = height / 2;
+  const radius = Math.min(width, height) * .4;
+  const innerRadius = radius * .58;
+  let angle = -Math.PI / 2;
+  rows.forEach((row, index) => {
+    const nextAngle = angle + Math.PI * 2 * row.count / total;
     ctx.beginPath();
-    points.forEach((point) => {
-      if (!point) { drawing = false; return; }
-      if (drawing) ctx.lineTo(point.x, point.y);
-      else { ctx.moveTo(point.x, point.y); drawing = true; }
-    });
-    ctx.stroke();
-    ctx.fillStyle = color;
-    finitePoints.forEach((point) => { ctx.beginPath(); ctx.arc(point.x, point.y, 2.2, 0, Math.PI * 2); ctx.fill(); });
-  };
-  drawSeries(costs, costMax, '#c87908', true);
-  drawSeries(durationSeconds, durationMax, '#2867b2', false);
-  ctx.fillStyle = '#7a857e';
-  [...new Set([0, Math.floor((labels.length - 1) / 2), labels.length - 1])].forEach((index) => {
-    const text = shortBucketLabel(labels[index]);
-    ctx.fillText(text, Math.max(box.left, Math.min(xAt(index) - 15, box.right - 34)), height - 6);
+    ctx.arc(cx, cy, radius, angle, nextAngle);
+    ctx.arc(cx, cy, innerRadius, nextAngle, angle, true);
+    ctx.closePath();
+    ctx.fillStyle = colors[index % colors.length];
+    ctx.fill();
+    angle = nextAngle;
   });
+  ctx.beginPath();
+  ctx.arc(cx, cy, innerRadius - 1, 0, Math.PI * 2);
+  ctx.fillStyle = '#fff';
+  ctx.fill();
+  ctx.fillStyle = '#111714';
+  ctx.font = '700 15px "Cascadia Code", Consolas, monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(fmtNum(total), cx, cy + 5);
+  ctx.textAlign = 'left';
 }
 
 function renderModelShare(rows) {
   const total = rows.reduce((sum, row) => sum + row.count, 0);
-  els.modelShare.innerHTML = rows.slice(0, 5).map((row, index) => {
+  const visibleRows = rows.slice(0, 5);
+  const colors = ['#2478e8', '#0ba66a', '#15b6d6', '#f08a00', '#7153a6'];
+  els.modelShare.innerHTML = visibleRows.map((row, index) => {
     const share = total ? row.count / total : 0;
-    const colors = ['#2867b2', '#0b9b5b', '#048495', '#7153a6', '#c87908'];
     return `<div class="model-row">
+      <span class="model-swatch" style="background:${colors[index]}"></span>
       <span class="model-name" title="${escapeHtml(row.key)}">${escapeHtml(row.key)}</span>
-      <span class="model-track"><span class="model-fill" style="width:${(share * 100).toFixed(1)}%;background:${colors[index]}"></span></span>
-      <span class="model-value">${fmtPercent(share)} · ${fmtNum(row.count)}</span>
+      <span class="model-value">${fmtPercent(share)} (${fmtNum(row.count)})</span>
     </div>`;
   }).join('') || '<div class="muted">暂无模型数据</div>';
+  drawDonutChart(document.getElementById('modelShareChart'), visibleRows, colors);
 }
 
 function renderAnalytics() {
@@ -490,27 +480,40 @@ function renderAnalytics() {
   const total = data?.summary?.request_records || 0;
   els.tokenTrendTotal.textContent = fmtCompact(usage.total_tokens);
   els.successRateValue.textContent = fmtPercent(total ? success / total : null);
-  els.periodCount.textContent = `${fmtNum(buckets.length)} 个周期 · ${data?.range?.bucket || 'day'} 粒度`;
+  document.getElementById('costTrendTotal').textContent = fmtMoney(data?.summary?.estimated_cost?.amount_usd);
+  document.getElementById('latencyTrendTotal').textContent = fmtMs(data?.summary?.average_request_duration_ms_estimate);
+  document.getElementById('firstOutputTotal').textContent = fmtMs(data?.summary?.average_first_output_ms_estimate);
+  const bucketLabels = { hour: '小时', day: '天', week: '周' };
+  els.periodCount.textContent = `${fmtNum(buckets.length)} 个周期 · ${bucketLabels[data?.range?.bucket] || '天'}粒度`;
 
   drawLineChart(document.getElementById('tokenTrendChart'), labels, [
     { values: buckets.map((b) => b.usage.total_tokens), color: '#0b9b5b', fill: true }
   ]);
   drawLineChart(document.getElementById('successTrendChart'), labels, [
-    { values: buckets.map((b) => b.success_rate), color: '#0b9b5b' }
+    { values: buckets.map((b) => b.success_rate), color: '#0b9b5b' },
+    { values: buckets.map((b) => Number.isFinite(b.success_rate) ? 1 - b.success_rate : null), color: '#ce4038' }
   ], { min: 0, max: 1, axisFormatter: (value) => `${Math.round(value * 100)}%` });
   drawGroupedBars(document.getElementById('tokenMixChart'), labels, [
     { values: buckets.map((b) => b.usage.input_tokens), color: '#2867b2' },
     { values: buckets.map((b) => b.usage.cached_input_tokens), color: '#0b9b5b' },
     { values: buckets.map((b) => b.usage.output_tokens), color: '#08a6bd' }
   ]);
-  drawCostLatency(
-    document.getElementById('costLatencyChart'), labels,
-    buckets.map((b) => b.estimated_cost?.amount_usd || 0),
-    buckets.map((b) => b.average_request_duration_ms_estimate)
-  );
+  drawLineChart(document.getElementById('costTrendChart'), labels, [
+    { values: buckets.map((b) => b.estimated_cost?.amount_usd || 0), color: '#f08a00', fill: true }
+  ], { axisFormatter: (value) => {
+    const amount = Math.max(0, value);
+    return `$${amount.toFixed(amount < 10 ? 1 : 0)}`;
+  } });
+  drawLineChart(document.getElementById('latencyTrendChart'), labels, [
+    { values: buckets.map((b) => Number.isFinite(b.average_request_duration_ms_estimate) ? b.average_request_duration_ms_estimate / 1000 : null), color: '#2478e8', fill: true }
+  ], { axisFormatter: (value) => `${Math.round(value)}s` });
   renderModelShare(data?.counts?.model || []);
 
-  els.periodRows.innerHTML = [...buckets].reverse().map((bucket) => `<tr>
+  const periodPageSize = 5;
+  const periodPageCount = Math.max(1, Math.ceil(buckets.length / periodPageSize));
+  state.periodPage = Math.min(Math.max(1, state.periodPage), periodPageCount);
+  const periodRows = [...buckets].reverse().slice((state.periodPage - 1) * periodPageSize, state.periodPage * periodPageSize);
+  els.periodRows.innerHTML = periodRows.map((bucket) => `<tr>
     <td class="mono">${escapeHtml(bucket.label)}</td>
     <td class="num">${fmtNum(bucket.records)}</td>
     <td class="num"><span class="success-text">${fmtNum(bucket.success_records)}</span> / ${fmtNum(bucket.failed_records)}</td>
@@ -522,6 +525,11 @@ function renderAnalytics() {
     <td class="num">${fmtMs(bucket.average_request_duration_ms_estimate)}</td>
     <td class="num">${fmtMs(bucket.average_first_output_ms_estimate)}</td>
   </tr>`).join('') || '<tr><td colspan="10" class="empty-row">当前范围没有可汇总的数据</td></tr>';
+  const pageItems = Array.from({ length: Math.min(periodPageCount, 5) }, (_, index) => index + 1);
+  els.periodPages.innerHTML = pageItems.map((page) => `<button type="button" data-period-page="${page}" class="${page === state.periodPage ? 'active' : ''}">${page}</button>`).join('')
+    + (periodPageCount > 5 ? `<span>…</span><button type="button" data-period-page="${periodPageCount}" class="${periodPageCount === state.periodPage ? 'active' : ''}">${periodPageCount}</button>` : '');
+  els.periodPrev.disabled = state.periodPage <= 1;
+  els.periodNext.disabled = state.periodPage >= periodPageCount;
 }
 
 function setView(view, updateHash = true) {
@@ -554,6 +562,7 @@ function render() {
 
 function resetPageAndLoad() {
   state.page = 1;
+  state.periodPage = 1;
   loadData().catch(showError);
 }
 
@@ -570,6 +579,11 @@ document.querySelectorAll('.chip').forEach((button) => {
   button.addEventListener('click', () => {
     document.querySelectorAll('.chip').forEach((item) => item.classList.remove('active'));
     button.classList.add('active');
+    if (button.dataset.days === 'custom') {
+      state.activeDays = null;
+      els.start.focus();
+      return;
+    }
     state.activeDays = Number(button.dataset.days);
     setDefaultRange(state.activeDays);
     resetPageAndLoad();
@@ -599,6 +613,20 @@ els.nextPage.addEventListener('click', () => {
   const totalPages = state.data?.pagination?.total_pages || state.page + 1;
   state.page = Math.min(totalPages, state.page + 1);
   loadData().catch(showError);
+});
+els.periodPrev.addEventListener('click', () => {
+  state.periodPage = Math.max(1, state.periodPage - 1);
+  renderAnalytics();
+});
+els.periodNext.addEventListener('click', () => {
+  state.periodPage += 1;
+  renderAnalytics();
+});
+els.periodPages.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-period-page]');
+  if (!button) return;
+  state.periodPage = Number(button.dataset.periodPage);
+  renderAnalytics();
 });
 
 let resizeTimer;
