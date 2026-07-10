@@ -97,9 +97,7 @@ function fmtMoney(value) {
 }
 
 function fmtCostEstimate(cost) {
-  const amount = fmtMoney(cost?.amount_usd);
-  if (amount === '—') return amount;
-  return cost?.is_lower_bound ? `≥${amount}` : amount;
+  return fmtMoney(cost?.amount_usd);
 }
 
 function costEstimateTitle(cost) {
@@ -180,7 +178,7 @@ function renderMetrics(data) {
   const success = countValue(data.counts.status, 'success');
   const failed = countValue(data.counts.status, 'failed');
   const costSub = cost.lower_bound_records
-    ? `${fmtNum(cost.priced_records)} 条已计价 / ${fmtNum(cost.lower_bound_records)} 条为下限`
+    ? `${fmtNum(cost.lower_bound_records)} 条缺缓存写入量`
     : `${fmtNum(cost.priced_records)} 条已计价`;
   els.metrics.innerHTML = [
     metric('请求记录', fmtNum(data.summary.request_records), `成功 ${fmtNum(success)} / 失败 ${fmtNum(failed)}`, 'accent-green'),

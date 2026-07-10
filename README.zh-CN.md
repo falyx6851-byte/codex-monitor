@@ -219,7 +219,8 @@ row.payload.info.last_token_usage
 
 - `reasoning_output_tokens` 已包含在输出 token 中，不重复加总。
 - `cached_input_tokens` 已包含在输入 token 中，不重复加总。
-- GPT-5.6 的缓存写入按普通输入费率的 `1.25x` 计费。若 session 没有提供 `cache_write_tokens`，页面显示 `≥$...`，表示当前金额是不含未知缓存写入附加费的下限。
+- GPT-5.6 的缓存写入按普通输入费率的 `1.25x` 计费。若 session 没有提供 `cache_write_tokens`，页面把未知部分暂按普通输入费率展示估算值；实际差额为缓存写入 token 乘以“缓存写入价减普通输入价”。
+- 当前 Codex 模型元数据报告 GPT-5.6 总上下文窗口为 `372,000`，按 `95%` 有效比例写入 session 的 `model_context_window` 为 `353,400`。OpenAI 当前 GPT-5.6 价格表没有长上下文加价档，超过 `272K` 不会在本项目中自动切换高价。
 - 只有总 token、没有输入/输出拆分的异常记录不计入已计价记录。
 - 这不是 OpenAI 官方账单，也不是 billing API 返回值。
 

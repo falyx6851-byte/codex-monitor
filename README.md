@@ -221,7 +221,8 @@ Notes:
 
 - `reasoning_output_tokens` is already included in output tokens.
 - `cached_input_tokens` is already included in input tokens.
-- GPT-5.6 cache writes are billed at `1.25x` the regular input rate. If a Codex session does not expose `cache_write_tokens`, the UI displays `≥$...`; that value is a lower bound excluding the unknown cache-write surcharge.
+- GPT-5.6 cache writes are billed at `1.25x` the regular input rate. If a Codex session does not expose `cache_write_tokens`, the UI prices the unknown portion at the regular input rate; the remaining difference is cache-write tokens multiplied by the cache-write rate minus the regular input rate.
+- Current Codex model metadata reports a `372,000` total GPT-5.6 context window and a `95%` effective window, producing the session value `model_context_window=353,400`. OpenAI's current GPT-5.6 pricing table has no long-context surcharge tier, so this project does not switch GPT-5.6 to a higher rate above `272K`.
 - Records without input/output breakdown are not counted as priced records.
 - This is not an OpenAI invoice or billing API result.
 

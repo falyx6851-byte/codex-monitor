@@ -5,8 +5,8 @@
   "notes": [
     "Costs are local estimates from token counts in Codex session JSONL, not official billing records.",
     "Regular input, cache reads, cache writes, and output are billed with their corresponding per-million-token rates when those usage fields are available.",
-    "GPT-5.6 cache writes are billed at cache_write_input_per_1m. When Codex session JSONL omits cache_write_tokens, the displayed amount is a lower bound.",
-    "Long context rates apply when input_tokens is greater than long_context_threshold_tokens."
+    "GPT-5.6 cache writes are billed at cache_write_input_per_1m. When Codex session JSONL omits cache_write_tokens, the displayed estimate treats those unknown tokens at the regular input rate.",
+    "Long context rates apply only to model entries that define a long_context block. The official GPT-5.6 pricing table currently has no long-context surcharge tier."
   ],
   "long_context_threshold_tokens": 270000,
   "models": {
