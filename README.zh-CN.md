@@ -23,6 +23,7 @@ http://127.0.0.1:4127
 - 顶部监控卡片：请求数、总 token、缓存命中率、输出 token、估算金额、平均响应耗时。
 - 自定义时间范围与分页。
 - 本地 SQLite 派生统计库，可删除后自动重建。
+- 支持 GPT-5.6 Sol / Terra / Luna 及 `gpt-5.6` 别名的公开标准费率。
 - 独立 CLI 统计脚本，可导出 table / JSON / CSV。
 
 ## 环境要求
@@ -205,11 +206,12 @@ row.payload.info.last_token_usage
 
 ## 费用口径
 
-费用来自 `pricing.json` 的本地估算：
+费用来自 `pricing.json` 的本地估算。GPT-5.6 的完整公式是：
 
 ```text
-未缓存输入 token * input rate
-+ 缓存输入 token * cached input rate
+普通输入 token * input rate
++ 缓存读取 token * cached input rate
++ 缓存写入 token * cache write rate
 + 输出 token * output rate
 ```
 
@@ -217,8 +219,11 @@ row.payload.info.last_token_usage
 
 - `reasoning_output_tokens` 已包含在输出 token 中，不重复加总。
 - `cached_input_tokens` 已包含在输入 token 中，不重复加总。
+- GPT-5.6 的缓存写入按普通输入费率的 `1.25x` 计费。若 session 没有提供 `cache_write_tokens`，页面显示 `≥$...`，表示当前金额是不含未知缓存写入附加费的下限。
 - 只有总 token、没有输入/输出拆分的异常记录不计入已计价记录。
 - 这不是 OpenAI 官方账单，也不是 billing API 返回值。
+
+当前配置包含 `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`；官方 `gpt-5.6` 别名按 Sol 费率解析。费率来源：`https://developers.openai.com/api/docs/pricing`。
 
 ## 本地 API
 

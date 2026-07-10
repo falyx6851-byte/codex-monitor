@@ -96,6 +96,21 @@ function fmtMoney(value) {
   return `$${n.toFixed(2)}`;
 }
 
+function fmtCostEstimate(cost) {
+  const amount = fmtMoney(cost?.amount_usd);
+  if (amount === '—') return amount;
+  return cost?.is_lower_bound ? `≥${amount}` : amount;
+}
+
+function costEstimateTitle(cost) {
+  if (!cost?.known) return cost?.reason || '';
+  const parts = [`${cost.model_key} / ${cost.tier}`];
+  if (cost.is_lower_bound) {
+    parts.push('session 未提供 cache_write_tokens；金额不含未知的 GPT-5.6 缓存写入附加费');
+  }
+  return parts.join('；');
+}
+
 function escapeHtml(value) {
   return String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -164,12 +179,15 @@ function renderMetrics(data) {
   const cost = data.summary.estimated_cost || {};
   const success = countValue(data.counts.status, 'success');
   const failed = countValue(data.counts.status, 'failed');
+  const costSub = cost.lower_bound_records
+    ? `${fmtNum(cost.priced_records)} 条已计价 / ${fmtNum(cost.lower_bound_records)} 条为下限`
+    : `${fmtNum(cost.priced_records)} 条已计价`;
   els.metrics.innerHTML = [
     metric('请求记录', fmtNum(data.summary.request_records), `成功 ${fmtNum(success)} / 失败 ${fmtNum(failed)}`, 'accent-green'),
     metric('总 Token', fmtCompact(usage.total_tokens), 'input + output', 'accent-cyan'),
     metric('缓存命中率', fmtPercent(data.summary.cache_hit_rate), `${fmtCompact(usage.cached_input_tokens)} cached`, 'accent-violet'),
     metric('输出 Token', fmtCompact(usage.output_tokens), 'last output tokens', 'accent-amber'),
-    metric('消耗金额', fmtMoney(cost.amount_usd), `${fmtNum(cost.priced_records)} 条已计价`, 'accent-amber'),
+    metric('估算金额', fmtCostEstimate(cost), costSub, 'accent-amber'),
     metric(
       '平均响应耗时',
       fmtMs(data.summary.average_request_duration_ms_estimate ?? data.summary.average_turn_elapsed_ms_estimate),
@@ -306,7 +324,7 @@ function renderRequests() {
       <td class="num">${fmtCompact(r.usage.cached_input_tokens)}</td>
       <td class="num">${fmtCompact(r.usage.output_tokens)}</td>
       <td class="num">${fmtCompact(r.usage.total_tokens)}</td>
-      <td class="num" title="${escapeHtml(r.cost_estimate?.known ? `${r.cost_estimate.model_key} / ${r.cost_estimate.tier}` : r.cost_estimate?.reason || '')}">${fmtMoney(r.cost_estimate?.amount_usd)}</td>
+      <td class="num" title="${escapeHtml(costEstimateTitle(r.cost_estimate))}">${fmtCostEstimate(r.cost_estimate)}</td>
       <td class="num" title="${escapeHtml(r.first_output_basis || '')}">${fmtMs(r.first_output_ms_estimate)}</td>
       <td class="num" title="${escapeHtml(durationTitle(r))}">${fmtMs(effectiveDurationMs(r))}</td>
       <td class="preview"><span title="${escapeHtml(r.source_context?.cwd || '')}">${escapeHtml(clampText(source, 80))}</span></td>

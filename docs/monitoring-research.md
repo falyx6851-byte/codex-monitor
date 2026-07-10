@@ -1,6 +1,6 @@
 # Codex token 监控调研
 
-调研时间：2026-06-23
+调研时间：2026-07-10
 
 ## 结论
 
@@ -21,7 +21,7 @@ OpenAI 官方可提供两类数据：
 | --- | --- | --- | --- |
 | Responses API | `status`、`model`、`created_at`、`completed_at`、`usage.input_tokens`、`usage.output_tokens`、`usage.total_tokens`、缓存输入和 reasoning 输出细分、错误 / incomplete 信息、输出 item、工具声明或工具调用摘要 | 不直接给本机历史请求列表；不直接给 TTFT | 只作为字段参考，不进入本地看板数据源 |
 | Responses streaming events | `response.created`、`response.output_text.delta`、`response.function_call_arguments.delta`、`response.completed` 等流式事件 | 需要可靠流式事件日志；当前 `logs_2.sqlite` 已剔除 | 不接入 |
-| Prompt caching | `cached_tokens` 是输入 token 的子集 | 不能把缓存 token 当作额外 token 加总 | 映射为 `cached_input_tokens` |
+| Prompt caching | `cached_tokens` 是缓存读取子集；GPT-5.6 起 `cache_write_tokens` 是缓存写入子集，写入费率为普通输入的 `1.25x` | 当前 Codex session 可能不写 `cache_write_tokens`，不能反推 | 缓存读取映射为 `cached_input_tokens`；缓存写入字段存在时计价，缺失时金额标记为下限 |
 | Organization Usage API | 按时间 bucket 汇总 completions 用量，可按 project/user/api key/model 等过滤或分组 | 不是 Codex OAuth 本地会话明细；需要 Admin key | 当前不接入 |
 | Codex Enterprise Analytics / Compliance | 管理员可看 Codex adoption、credits、tokens、客户端、用户排行；Compliance API 可导出活动日志和请求元数据 | 面向企业 workspace 和管理员，不是个人本机免密接口 | 作为官方可用能力记录，不纳入本地脚本 |
 | Codex auth 文档 | `~/.codex/auth.json` 可能保存访问 token，需像密码一样保护 | 不应为了额度百分比或私有接口读取该文件 | 本项目明确不读取 |
@@ -40,6 +40,7 @@ OpenAI 官方可提供两类数据：
 | `model` / `effort` | 最近的 `turn_context` | 本地上下文中的模型和 reasoning effort |
 | `input_tokens` | `last_token_usage.input_tokens` | 本次 token_count 记录的输入 token |
 | `cached_input_tokens` | `last_token_usage.cached_input_tokens` | 输入 token 子集，不加总到 total 之外 |
+| `cache_write_input_tokens` | `last_token_usage.cache_write_tokens` 或 `input_tokens_details.cache_write_tokens`（若存在） | GPT-5.6 缓存写入 token 子集；缺失保持 `null`，不按 `0` 伪造 |
 | `output_tokens` | `last_token_usage.output_tokens` | 本次输出 token |
 | `reasoning_output_tokens` | `last_token_usage.reasoning_output_tokens` | 输出 token 子集，不加总到 total 之外 |
 | `total_tokens` | `last_token_usage.total_tokens` | 主加总字段 |

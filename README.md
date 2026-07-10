@@ -6,6 +6,8 @@ Local Codex token and request monitoring dashboard.
 
 This project reads Codex session JSONL files from your local machine, normalizes token usage records into a local SQLite database, and serves a dashboard at `http://127.0.0.1:4127`.
 
+The pricing configuration supports GPT-5.6 Sol, Terra, Luna, and the `gpt-5.6` alias.
+
 It is intentionally local-first:
 
 - No reverse proxy.
@@ -206,13 +208,12 @@ If no explicit HTTP status or error code is present in the session JSONL, the pr
 
 ## Cost Semantics
 
-Costs are estimates from `pricing.json`.
-
-Formula:
+Costs are estimates from `pricing.json`. The complete GPT-5.6 formula is:
 
 ```text
-uncached_input_tokens * input_rate
-+ cached_input_tokens * cached_input_rate
+regular_input_tokens * input_rate
++ cache_read_tokens * cached_input_rate
++ cache_write_tokens * cache_write_rate
 + output_tokens * output_rate
 ```
 
@@ -220,8 +221,11 @@ Notes:
 
 - `reasoning_output_tokens` is already included in output tokens.
 - `cached_input_tokens` is already included in input tokens.
+- GPT-5.6 cache writes are billed at `1.25x` the regular input rate. If a Codex session does not expose `cache_write_tokens`, the UI displays `≥$...`; that value is a lower bound excluding the unknown cache-write surcharge.
 - Records without input/output breakdown are not counted as priced records.
 - This is not an OpenAI invoice or billing API result.
+
+Configured models are `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`; the official `gpt-5.6` alias resolves to Sol pricing. Rate source: `https://developers.openai.com/api/docs/pricing`.
 
 ## API
 

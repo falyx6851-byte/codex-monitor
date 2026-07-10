@@ -61,9 +61,20 @@ function finiteOrZero(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function optionalFinite(value) {
+  if (value == null) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 function normalizeUsage(usage) {
   const input = finiteOrZero(usage?.input_tokens);
   const cached = finiteOrZero(usage?.cached_input_tokens ?? usage?.input_tokens_details?.cached_tokens);
+  const cacheWrite = optionalFinite(
+    usage?.cache_write_input_tokens ??
+    usage?.cache_write_tokens ??
+    usage?.input_tokens_details?.cache_write_tokens
+  );
   const output = finiteOrZero(usage?.output_tokens);
   const reasoning = finiteOrZero(usage?.reasoning_output_tokens ?? usage?.output_tokens_details?.reasoning_tokens);
   const hasOfficialTotal = usage?.total_tokens != null;
@@ -71,6 +82,7 @@ function normalizeUsage(usage) {
   return {
     input_tokens: input,
     cached_input_tokens: cached,
+    cache_write_input_tokens: cacheWrite,
     output_tokens: output,
     reasoning_output_tokens: reasoning,
     total_tokens: total
@@ -78,9 +90,13 @@ function normalizeUsage(usage) {
 }
 
 function addUsage(a, b) {
+  const aCacheWrite = optionalFinite(a.cache_write_input_tokens);
+  const bCacheWrite = optionalFinite(b.cache_write_input_tokens);
   return {
     input_tokens: a.input_tokens + b.input_tokens,
     cached_input_tokens: a.cached_input_tokens + b.cached_input_tokens,
+    cache_write_input_tokens:
+      aCacheWrite == null || bCacheWrite == null ? null : aCacheWrite + bCacheWrite,
     output_tokens: a.output_tokens + b.output_tokens,
     reasoning_output_tokens: a.reasoning_output_tokens + b.reasoning_output_tokens,
     total_tokens: a.total_tokens + b.total_tokens
@@ -91,6 +107,7 @@ function emptyUsage() {
   return {
     input_tokens: 0,
     cached_input_tokens: 0,
+    cache_write_input_tokens: 0,
     output_tokens: 0,
     reasoning_output_tokens: 0,
     total_tokens: 0
@@ -101,6 +118,7 @@ function usageTuple(usage) {
   return [
     usage.input_tokens,
     usage.cached_input_tokens,
+    usage.cache_write_input_tokens == null ? '?' : usage.cache_write_input_tokens,
     usage.output_tokens,
     usage.reasoning_output_tokens,
     usage.total_tokens
@@ -208,29 +226,48 @@ function estimateCost(usage, model) {
   const threshold = Number(pricingConfig.long_context_threshold_tokens || 270000);
   const useLongContext = resolved.pricing.long_context && inputTokens > threshold;
   const rates = useLongContext ? resolved.pricing.long_context : resolved.pricing;
-  const inputUsd = (uncachedInputTokens / 1_000_000) * finiteOrZero(rates.input_per_1m);
+  const cacheWriteRate = optionalFinite(rates.cache_write_input_per_1m);
+  const reportedCacheWriteTokens = optionalFinite(usage?.cache_write_input_tokens);
+  const cacheWriteTokens = cacheWriteRate == null || reportedCacheWriteTokens == null
+    ? 0
+    : Math.min(uncachedInputTokens, Math.max(0, reportedCacheWriteTokens));
+  const regularInputTokens = Math.max(0, uncachedInputTokens - cacheWriteTokens);
+  const cacheWriteMissing =
+    cacheWriteRate != null && reportedCacheWriteTokens == null && uncachedInputTokens > 0;
+  const inputUsd = (regularInputTokens / 1_000_000) * finiteOrZero(rates.input_per_1m);
   const cachedUsd = (cachedInputTokens / 1_000_000) * finiteOrZero(rates.cached_input_per_1m);
+  const cacheWriteUsd = cacheWriteRate == null
+    ? 0
+    : (cacheWriteTokens / 1_000_000) * cacheWriteRate;
   const outputUsd = (outputTokens / 1_000_000) * finiteOrZero(rates.output_per_1m);
-  const amountUsd = inputUsd + cachedUsd + outputUsd;
+  const amountUsd = inputUsd + cachedUsd + cacheWriteUsd + outputUsd;
   return {
     currency: pricingConfig.currency || 'USD',
     amount_usd: amountUsd,
     known: true,
+    complete: !cacheWriteMissing,
+    is_lower_bound: cacheWriteMissing,
+    estimate_kind: cacheWriteMissing ? 'lower_bound' : 'token_rate_estimate',
+    reason: cacheWriteMissing ? 'cache_write_tokens_unavailable_in_codex_session' : null,
     model_key: resolved.key,
     tier: useLongContext ? 'long_context' : 'standard',
     source: pricingConfig.source || '',
     updated_at: pricingConfig.updated_at || '',
-    input_tokens_billed_at_input_rate: uncachedInputTokens,
+    input_tokens_billed_at_input_rate: regularInputTokens,
     cached_input_tokens_billed_at_cached_rate: cachedInputTokens,
+    cache_write_input_tokens_billed_at_cache_write_rate:
+      cacheWriteRate == null || reportedCacheWriteTokens != null ? cacheWriteTokens : null,
     output_tokens_billed_at_output_rate: outputTokens,
     rates_per_1m: {
       input: finiteOrZero(rates.input_per_1m),
       cached_input: finiteOrZero(rates.cached_input_per_1m),
+      cache_write_input: cacheWriteRate,
       output: finiteOrZero(rates.output_per_1m)
     },
     components_usd: {
       input: inputUsd,
       cached_input: cachedUsd,
+      cache_write_input: cacheWriteMissing ? null : cacheWriteUsd,
       output: outputUsd
     }
   };
@@ -304,11 +341,13 @@ const TOKEN_RECORD_COLUMNS = [
   'error_reason',
   'input_tokens',
   'cached_input_tokens',
+  'cache_write_input_tokens',
   'output_tokens',
   'reasoning_output_tokens',
   'total_tokens',
   'total_input_tokens_snapshot',
   'total_cached_input_tokens_snapshot',
+  'total_cache_write_input_tokens_snapshot',
   'total_output_tokens_snapshot',
   'total_reasoning_output_tokens_snapshot',
   'total_tokens_snapshot',
@@ -373,11 +412,13 @@ function initDb() {
       error_reason TEXT,
       input_tokens INTEGER NOT NULL DEFAULT 0,
       cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+      cache_write_input_tokens INTEGER,
       output_tokens INTEGER NOT NULL DEFAULT 0,
       reasoning_output_tokens INTEGER NOT NULL DEFAULT 0,
       total_tokens INTEGER NOT NULL DEFAULT 0,
       total_input_tokens_snapshot INTEGER,
       total_cached_input_tokens_snapshot INTEGER,
+      total_cache_write_input_tokens_snapshot INTEGER,
       total_output_tokens_snapshot INTEGER,
       total_reasoning_output_tokens_snapshot INTEGER,
       total_tokens_snapshot INTEGER,
@@ -410,6 +451,8 @@ function initDb() {
   ensureColumn(database, 'token_records', 'error_reason', 'TEXT');
   ensureColumn(database, 'token_records', 'service_tier', 'TEXT');
   ensureColumn(database, 'token_records', 'service_tier_source', 'TEXT');
+  ensureColumn(database, 'token_records', 'cache_write_input_tokens', 'INTEGER');
+  ensureColumn(database, 'token_records', 'total_cache_write_input_tokens_snapshot', 'INTEGER');
   database.prepare(`
     UPDATE token_records
     SET
@@ -729,11 +772,13 @@ function parseSessionFile(file, stat) {
       error_reason: item.error_reason || null,
       input_tokens: item.usage.input_tokens,
       cached_input_tokens: item.usage.cached_input_tokens,
+      cache_write_input_tokens: item.usage.cache_write_input_tokens,
       output_tokens: item.usage.output_tokens,
       reasoning_output_tokens: item.usage.reasoning_output_tokens,
       total_tokens: item.usage.total_tokens,
       total_input_tokens_snapshot: totalUsage?.input_tokens ?? null,
       total_cached_input_tokens_snapshot: totalUsage?.cached_input_tokens ?? null,
+      total_cache_write_input_tokens_snapshot: totalUsage?.cache_write_input_tokens ?? null,
       total_output_tokens_snapshot: totalUsage?.output_tokens ?? null,
       total_reasoning_output_tokens_snapshot: totalUsage?.reasoning_output_tokens ?? null,
       total_tokens_snapshot: totalUsage?.total_tokens ?? null,
@@ -932,6 +977,7 @@ function totalUsageSnapshotFromRow(row) {
   return {
     input_tokens: row.total_input_tokens_snapshot ?? 0,
     cached_input_tokens: row.total_cached_input_tokens_snapshot ?? 0,
+    cache_write_input_tokens: row.total_cache_write_input_tokens_snapshot ?? null,
     output_tokens: row.total_output_tokens_snapshot ?? 0,
     reasoning_output_tokens: row.total_reasoning_output_tokens_snapshot ?? 0,
     total_tokens: row.total_tokens_snapshot ?? 0
@@ -942,6 +988,7 @@ function rowToRequest(row) {
   const usage = {
     input_tokens: row.input_tokens ?? 0,
     cached_input_tokens: row.cached_input_tokens ?? 0,
+    cache_write_input_tokens: row.cache_write_input_tokens ?? null,
     output_tokens: row.output_tokens ?? 0,
     reasoning_output_tokens: row.reasoning_output_tokens ?? 0,
     total_tokens: row.total_tokens ?? 0
@@ -1014,6 +1061,7 @@ function summarizeCost(requests) {
   let amountUsd = 0;
   let pricedRecords = 0;
   let unpricedRecords = 0;
+  let lowerBoundRecords = 0;
   const byModel = new Map();
   for (const request of requests) {
     const cost = request.cost_estimate;
@@ -1023,9 +1071,11 @@ function summarizeCost(requests) {
     if (cost?.known && Number.isFinite(cost.amount_usd) && hasBillableBreakdown) {
       amountUsd += cost.amount_usd;
       pricedRecords++;
+      if (cost.is_lower_bound) lowerBoundRecords++;
       const key = cost.model_key || request.model || 'unknown';
-      const item = byModel.get(key) || { model: key, records: 0, amount_usd: 0 };
+      const item = byModel.get(key) || { model: key, records: 0, lower_bound_records: 0, amount_usd: 0 };
       item.records++;
+      if (cost.is_lower_bound) item.lower_bound_records++;
       item.amount_usd += cost.amount_usd;
       byModel.set(key, item);
     } else if (hasTokens) {
@@ -1037,6 +1087,8 @@ function summarizeCost(requests) {
     amount_usd: amountUsd,
     priced_records: pricedRecords,
     unpriced_records: unpricedRecords,
+    lower_bound_records: lowerBoundRecords,
+    is_lower_bound: lowerBoundRecords > 0,
     source: pricingConfig.source || '',
     updated_at: pricingConfig.updated_at || '',
     by_model: [...byModel.values()].sort((a, b) => b.amount_usd - a.amount_usd)
@@ -1118,7 +1170,7 @@ function buildData(startMs, endMs, bucket, pagination) {
       first_output_ms_estimate: 'local_observed_model_request_start_to_first_response_item',
       stream_observed: 'local_response_item_count_before_token_count_not_official_stream_flag',
       service_tier: 'codex_session_request_service_tier_when_present_no_current_config_backfill',
-      cost_estimate: 'local_estimate_from_configured_official_per_1m_token_rates',
+      cost_estimate: 'local_token_rate_estimate_cache_write_lower_bound_when_usage_missing',
       turn_duration_ms_estimate: 'local_session_task_started_to_task_complete',
       excluded_sources: ['logs_2.sqlite', 'raw_sse', 'codex_otel']
     },
