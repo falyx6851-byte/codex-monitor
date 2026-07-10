@@ -197,6 +197,15 @@ function emptyUsage() {
   };
 }
 
+function isSystemUsageWithoutBreakdown(usage) {
+  return (
+    usage.total_tokens > 0 &&
+    usage.input_tokens === 0 &&
+    usage.cached_input_tokens === 0 &&
+    usage.output_tokens === 0
+  );
+}
+
 function usageTuple(usage) {
   return [
     usage.input_tokens,
@@ -230,6 +239,7 @@ function scanSessions(options) {
   let malformedLines = 0;
   let tokenEvents = 0;
   let duplicateEvents = 0;
+  let excludedSystemEvents = 0;
 
   for (const file of files) {
     let stat;
@@ -379,6 +389,11 @@ function scanSessions(options) {
           resetModelCall();
           continue;
         }
+        if (isSystemUsageWithoutBreakdown(usage)) {
+          excludedSystemEvents++;
+          resetModelCall();
+          continue;
+        }
         const totalUsage = normalizeUsage(payload.info?.total_token_usage || {});
         const totalUsageSnapshot = totalUsage.total_tokens > 0 ? totalUsage : null;
         const key = dedupeKey(session.id, usage, totalUsageSnapshot);
@@ -480,6 +495,7 @@ function scanSessions(options) {
       scanned_lines: scannedLines,
       malformed_lines: malformedLines,
       token_count_events: tokenEvents,
+      excluded_system_token_count_events: excludedSystemEvents,
       duplicate_events: duplicateEvents,
       dedupe_strategy: options.dedupe
         ? 'session_id + last_token_usage_tuple + total_token_usage_snapshot_tuple'
@@ -548,6 +564,7 @@ function summarize(scan, options) {
       first_output_ms_estimate: 'local_observed_model_request_start_to_first_response_item',
       stream_observed: 'local_response_item_count_before_token_count_not_official_stream_flag',
       turn_duration_ms_estimate: 'local_session_task_started_to_task_complete',
+      excluded_system_records: 'breakdownless_token_count_events_from_compaction_abort_or_rollback',
       excluded_sources: ['logs_2.sqlite', 'raw_sse', 'codex_otel']
     },
     diagnostics: scan.diagnostics,

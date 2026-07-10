@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="light">
     <title>Codex Monitor</title>
+    <link rel="icon" href="data:,">
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
@@ -12,14 +13,14 @@
       <div class="brand" aria-label="Codex Monitor">
         <div class="brand-mark" aria-hidden="true">C/</div>
         <div class="brand-copy">
-          <span class="brand-kicker">LOCAL TELEMETRY</span>
           <h1>Codex Monitor</h1>
+          <span class="brand-kicker">LOCAL SESSION TELEMETRY</span>
         </div>
       </div>
 
-      <nav class="primary-nav" aria-label="页面导航">
-        <a class="active" href="#overview">运行概览</a>
-        <a href="#requests">请求明细</a>
+      <nav class="primary-nav" aria-label="主导航">
+        <button class="nav-tab active" data-view="requests" aria-controls="requestView" aria-pressed="true" type="button">请求监控</button>
+        <button class="nav-tab" data-view="analytics" aria-controls="analyticsView" aria-pressed="false" type="button">周期统计</button>
       </nav>
 
       <div class="runtime-status" aria-live="polite">
@@ -59,7 +60,17 @@
         </label>
       </div>
 
-      <label class="page-size">
+      <label class="bucket-control">
+        <span>统计粒度</span>
+        <select id="bucketInput">
+          <option value="auto" selected>自动</option>
+          <option value="hour">小时</option>
+          <option value="day">天</option>
+          <option value="week">周</option>
+        </select>
+      </label>
+
+      <label id="pageSizeControl" class="page-size">
         <span>每页行数</span>
         <select id="pageSizeInput">
           <option value="7" selected>7 行</option>
@@ -75,7 +86,7 @@
       <div id="errorBanner" class="error-banner" role="alert" hidden></div>
       <section id="overview" class="metric-strip" aria-label="监控概览"></section>
 
-      <section class="data-workbench" id="requests" aria-labelledby="requestsTitle">
+      <section id="requestView" class="view active" aria-labelledby="requestsTitle">
         <div class="panel-head">
           <div class="panel-title">
             <span class="section-index" aria-hidden="true">01</span>
@@ -90,8 +101,8 @@
             <button id="nextPageBtn" class="icon-button" type="button" title="下一页" aria-label="下一页">→</button>
           </div>
         </div>
-        <div class="table-wrap">
-          <table>
+        <div class="table-wrap request-table-wrap">
+          <table class="request-table">
             <thead>
               <tr>
                 <th>记录时间</th>
@@ -114,19 +125,77 @@
           </table>
         </div>
       </section>
+
+      <section id="analyticsView" class="view analytics-view" aria-label="周期统计" hidden>
+        <div class="analytics-scroll">
+          <div class="analytics-grid">
+            <article class="chart-panel span-2">
+              <div class="chart-head">
+                <div><span class="eyebrow">TOKEN VOLUME</span><h2>Token 消耗趋势</h2></div>
+                <strong id="tokenTrendTotal" class="chart-total">—</strong>
+              </div>
+              <canvas id="tokenTrendChart" aria-label="Token 消耗趋势图"></canvas>
+            </article>
+
+            <article class="chart-panel">
+              <div class="chart-head">
+                <div><span class="eyebrow">RELIABILITY</span><h2>请求成功率</h2></div>
+                <strong id="successRateValue" class="chart-total success-text">—</strong>
+              </div>
+              <canvas id="successTrendChart" aria-label="请求成功率趋势图"></canvas>
+            </article>
+
+            <article class="chart-panel">
+              <div class="chart-head">
+                <div><span class="eyebrow">TOKEN MIX</span><h2>输入 / 缓存 / 输出</h2></div>
+              </div>
+              <canvas id="tokenMixChart" aria-label="Token 构成趋势图"></canvas>
+            </article>
+
+            <article class="chart-panel">
+              <div class="chart-head">
+                <div><span class="eyebrow">MODEL SHARE</span><h2>模型使用占比</h2></div>
+              </div>
+              <div id="modelShare" class="model-share"></div>
+            </article>
+
+            <article class="chart-panel">
+              <div class="chart-head">
+                <div><span class="eyebrow">COST & LATENCY</span><h2>费用与响应耗时</h2></div>
+                <div class="legend"><span class="amber-dot">费用</span><span class="blue-dot">耗时</span></div>
+              </div>
+              <canvas id="costLatencyChart" aria-label="费用与响应耗时趋势图"></canvas>
+            </article>
+          </div>
+
+          <section class="period-table-panel" aria-labelledby="periodTableTitle">
+            <div class="period-table-head">
+              <div><span class="eyebrow">PERIOD LEDGER</span><h2 id="periodTableTitle">周期明细</h2></div>
+              <span id="periodCount" class="muted">0 个周期</span>
+            </div>
+            <div class="table-wrap period-table-wrap">
+              <table class="period-table">
+                <thead>
+                  <tr>
+                    <th>周期</th><th class="num">请求数</th><th class="num">成功 / 失败</th>
+                    <th class="num">总 Token</th><th class="num">缓存 Token</th><th class="num">缓存命中率</th>
+                    <th class="num">输出 Token</th><th class="num">估算费用</th><th class="num">平均响应</th><th class="num">平均首输出</th>
+                  </tr>
+                </thead>
+                <tbody id="periodRows"></tbody>
+              </table>
+            </div>
+          </section>
+        </div>
+      </section>
     </main>
 
     <dialog id="detailDialog">
       <div class="dialog-head">
-        <div>
-          <span class="brand-kicker">REQUEST PAYLOAD</span>
-          <h2>请求记录详情</h2>
-        </div>
-        <form method="dialog">
-          <button class="close icon-button" value="close" title="关闭" aria-label="关闭">×</button>
-        </form>
+        <div><span class="eyebrow">REQUEST RECORD</span><h2>请求记录详情</h2></div>
+        <form method="dialog"><button class="close icon-button" value="close" title="关闭" aria-label="关闭">×</button></form>
       </div>
-      <pre id="detailText"></pre>
+      <div id="detailContent" class="detail-content"></div>
     </dialog>
 
     <script src="/app.js"></script>

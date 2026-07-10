@@ -176,8 +176,8 @@ Relevant session fields:
 | Total tokens | `last_token_usage.total_tokens` | Main per-record total |
 | Model | Latest local `turn_context.model` | Local session context |
 | Timestamp | `token_count.timestamp` | Local session event timestamp |
-| Status | `token_count`, `event_msg/error`, partial usage anomaly | Displayed as success / failed |
-| Error reason | `event_msg/error.payload.message` or local anomaly reason | Not fabricated when unavailable |
+| Status | normal request-level `token_count`, explicit `event_msg/error` | Displayed as success / failed |
+| Error reason | `event_msg/error.payload.message` | Not fabricated when unavailable |
 | Cost estimate | `pricing.json` + token usage | Local estimate, not official billing |
 | First output estimate | local boundary to first `response_item` | Not official TTFT |
 | Response duration estimate | local boundary to `token_count` | Not server-side latency |
@@ -202,7 +202,8 @@ The dashboard only shows:
 `failed` means one of:
 
 - The session contains an explicit `event_msg/error`.
-- `last_token_usage` has `total_tokens > 0` but input/cache/output are all `0`, so the record is treated as an incomplete or anomalous local session usage record.
+
+Events where `last_token_usage.total_tokens > 0` but input/cache/output are all `0` are not requests and are not failures. Auditing real session sequences shows that Codex emits these breakdownless token events during context compaction, turn abort, or thread rollback. They are excluded from request counts, costs, status totals, and period analytics.
 
 If no explicit HTTP status or error code is present in the session JSONL, the project does not invent one. In particular, it does not infer `429`, `500`, or network failure unless Codex wrote that information into the session.
 

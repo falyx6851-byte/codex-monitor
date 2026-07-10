@@ -174,8 +174,8 @@ row.payload.info.last_token_usage
 | 总 token | `last_token_usage.total_tokens` | 请求级主加总字段 |
 | 模型 | 最近的 `turn_context.model` | 本地 session 上下文 |
 | 时间戳 | `token_count.timestamp` | 本地 session 事件时间 |
-| 状态 | `token_count`、`event_msg/error`、usage 异常 | 只显示成功 / 失败 |
-| 错误原因 | `event_msg/error.payload.message` 或本地异常原因 | 没有明确原因时不编造 |
+| 状态 | 正常请求级 `token_count`、明确的 `event_msg/error` | 只显示成功 / 失败 |
+| 错误原因 | `event_msg/error.payload.message` | 没有明确原因时不编造 |
 | 费用估算 | `pricing.json` + token usage | 本地估算，不是官方账单 |
 | 首输出估算 | 本地边界到首个 `response_item` | 不是官方 TTFT |
 | 响应耗时估算 | 本地边界到 `token_count` | 不是服务端耗时 |
@@ -200,7 +200,8 @@ row.payload.info.last_token_usage
 失败来源：
 
 - session 中存在明确 `event_msg/error`。
-- `last_token_usage.total_tokens > 0`，但输入、缓存、输出全是 `0`。这类记录视为本地 session usage 明细不完整或异常。
+
+`last_token_usage.total_tokens > 0`，但输入、缓存、输出全是 `0` 的事件不会算作请求，也不会算作失败。实际 session 审计表明，这类事件会由上下文压缩、turn abort 或 thread rollback 产生，只代表 Codex 内部状态维护，缺少请求级 usage 拆分。
 
 如果 session JSONL 没有写 HTTP status 或错误码，本项目不会推断 `429`、`500` 或网络错误。
 

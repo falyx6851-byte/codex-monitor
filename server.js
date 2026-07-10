@@ -173,13 +173,6 @@ function isPartialUsageWithoutBreakdown(usage) {
   );
 }
 
-function partialUsageErrorReason(isContextCompaction) {
-  if (isContextCompaction) {
-    return '上下文压缩 token_count 缺少本次输入/输出 usage 明细；session 未记录明确错误原因';
-  }
-  return 'token_count 缺少本次输入/输出 usage 明细；session 未记录明确错误原因';
-}
-
 function loadPricing() {
   try {
     return JSON.parse(fs.readFileSync(PRICING_FILE, 'utf8'));
@@ -296,21 +289,100 @@ function bucketLabel(ms, width) {
   return width === 'hour' ? `${date} ${pad(d.getHours())}:00` : date;
 }
 
-function summarizeBuckets(requests, width) {
+function createBucketAccumulator(ts, width) {
+  return {
+    ts,
+    label: bucketLabel(ts, width),
+    records: 0,
+    success_records: 0,
+    failed_records: 0,
+    usage: emptyUsage(),
+    amount_usd: 0,
+    priced_records: 0,
+    lower_bound_records: 0,
+    duration_sum: 0,
+    duration_records: 0,
+    first_output_sum: 0,
+    first_output_records: 0
+  };
+}
+
+function nextBucketStart(ts, width) {
+  const d = new Date(ts);
+  if (width === 'hour') d.setHours(d.getHours() + 1);
+  else if (width === 'week') d.setDate(d.getDate() + 7);
+  else d.setDate(d.getDate() + 1);
+  return d.getTime();
+}
+
+function summarizeBuckets(requests, width, startMs, endMs) {
   const map = new Map();
   for (const req of requests) {
     const ts = bucketStart(req.completed_ms || req.response_timestamp_ms || 0, width);
-    const item = map.get(ts) || {
-      ts,
-      label: bucketLabel(ts, width),
-      records: 0,
-      usage: emptyUsage()
-    };
+    const item = map.get(ts) || createBucketAccumulator(ts, width);
     item.records++;
+    if (req.status === 'failed') item.failed_records++;
+    else item.success_records++;
     item.usage = addUsage(item.usage, req.usage);
+    const hasBillableBreakdown =
+      req.usage.input_tokens > 0 || req.usage.cached_input_tokens > 0 || req.usage.output_tokens > 0;
+    if (req.cost_estimate?.known && hasBillableBreakdown && Number.isFinite(req.cost_estimate.amount_usd)) {
+      item.amount_usd += req.cost_estimate.amount_usd;
+      item.priced_records++;
+      if (req.cost_estimate.is_lower_bound) item.lower_bound_records++;
+    }
+    if (Number.isFinite(req.duration_ms_estimate) && req.duration_ms_estimate > 0) {
+      item.duration_sum += req.duration_ms_estimate;
+      item.duration_records++;
+    }
+    if (Number.isFinite(req.first_output_ms_estimate) && req.first_output_ms_estimate >= 0) {
+      item.first_output_sum += req.first_output_ms_estimate;
+      item.first_output_records++;
+    }
     map.set(ts, item);
   }
-  return [...map.values()].sort((a, b) => a.ts - b.ts);
+  const firstRequestMs = requests.length
+    ? requests.reduce(
+      (min, req) => Math.min(min, req.completed_ms || req.response_timestamp_ms || endMs),
+      endMs
+    )
+    : startMs;
+  const fillStart = bucketStart(Math.max(startMs, firstRequestMs), width);
+  const fillEnd = bucketStart(endMs, width);
+  const expected = [];
+  for (let ts = fillStart; ts <= fillEnd && expected.length <= 500; ts = nextBucketStart(ts, width)) {
+    expected.push(ts);
+  }
+  if (expected.length <= 500 && expected.at(-1) === fillEnd) {
+    expected.forEach((ts) => {
+      if (!map.has(ts)) map.set(ts, createBucketAccumulator(ts, width));
+    });
+  }
+  return [...map.values()]
+    .sort((a, b) => a.ts - b.ts)
+    .map((item) => ({
+      ts: item.ts,
+      label: item.label,
+      records: item.records,
+      success_records: item.success_records,
+      failed_records: item.failed_records,
+      success_rate: item.records ? item.success_records / item.records : null,
+      usage: item.usage,
+      cache_hit_rate: cacheHitRate(item.usage),
+      estimated_cost: {
+        currency: pricingConfig.currency || 'USD',
+        amount_usd: item.amount_usd,
+        priced_records: item.priced_records,
+        lower_bound_records: item.lower_bound_records,
+        is_lower_bound: item.lower_bound_records > 0
+      },
+      average_request_duration_ms_estimate: item.duration_records
+        ? item.duration_sum / item.duration_records
+        : null,
+      average_first_output_ms_estimate: item.first_output_records
+        ? item.first_output_sum / item.first_output_records
+        : null
+    }));
 }
 
 function parseSessionIdFromPath(file) {
@@ -453,26 +525,6 @@ function initDb() {
   ensureColumn(database, 'token_records', 'service_tier_source', 'TEXT');
   ensureColumn(database, 'token_records', 'cache_write_input_tokens', 'INTEGER');
   ensureColumn(database, 'token_records', 'total_cache_write_input_tokens_snapshot', 'INTEGER');
-  database.prepare(`
-    UPDATE token_records
-    SET
-      status = 'failed',
-      error_reason = CASE
-        WHEN error_reason IS NULL OR error_reason = ''
-          THEN ?
-        ELSE error_reason
-      END,
-      terminal_event_type = CASE
-        WHEN terminal_event_type = 'session.token_count'
-          THEN 'session.token_count.partial_usage'
-        ELSE terminal_event_type
-      END
-    WHERE input_tokens = 0
-      AND cached_input_tokens = 0
-      AND output_tokens = 0
-      AND total_tokens > 0
-      AND (status IS NULL OR lower(status) NOT IN ('failed', 'error'))
-  `).run(partialUsageErrorReason(false));
   return database;
 }
 
@@ -674,7 +726,11 @@ function parseSessionFile(file, stat) {
       }
       const totalUsage = normalizeUsage(payload.info?.total_token_usage || {});
       const partialUsage = isPartialUsageWithoutBreakdown(usage);
-      const errorReason = partialUsage ? partialUsageErrorReason(pendingContextCompactionTokenCount) : null;
+      if (partialUsage) {
+        pendingContextCompactionTokenCount = false;
+        resetModelCall();
+        continue;
+      }
       const requestStartMs = activeModelCall?.request_start_ms ?? pendingModelStartMs ?? currentTurn?.started_ms ?? null;
       const firstOutputMs = activeModelCall?.first_output_ms ?? null;
       const responseItemCount = activeModelCall?.response_item_count ?? 0;
@@ -705,11 +761,9 @@ function parseSessionFile(file, stat) {
       const record = {
         ms,
         timestamp: row.timestamp || null,
-        terminal_event_type: partialUsage
-          ? (pendingContextCompactionTokenCount ? 'session.token_count.context_compaction' : 'session.token_count.partial_usage')
-          : 'session.token_count',
-        status: partialUsage ? 'failed' : 'success',
-        error_reason: errorReason,
+        terminal_event_type: 'session.token_count',
+        status: 'success',
+        error_reason: null,
         usage,
         total_usage_snapshot: totalUsage.total_tokens > 0 ? totalUsage : null,
         model: currentModel || session.model || '',
@@ -1052,9 +1106,33 @@ function rowToRequest(row) {
 
 function queryTokenRecords(startMs, endMs) {
   return db
-    .prepare('SELECT * FROM token_records WHERE ms >= ? AND ms <= ? ORDER BY ms DESC')
+    .prepare(`
+      SELECT *
+      FROM token_records
+      WHERE ms >= ? AND ms <= ?
+        AND NOT (
+          input_tokens = 0
+          AND cached_input_tokens = 0
+          AND output_tokens = 0
+          AND total_tokens > 0
+        )
+      ORDER BY ms DESC
+    `)
     .all(startMs, endMs)
     .map(rowToRequest);
+}
+
+function countExcludedSystemRecords(startMs, endMs) {
+  const row = db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM token_records
+    WHERE ms >= ? AND ms <= ?
+      AND input_tokens = 0
+      AND cached_input_tokens = 0
+      AND output_tokens = 0
+      AND total_tokens > 0
+  `).get(startMs, endMs);
+  return Number(row?.count || 0);
 }
 
 function summarizeCost(requests) {
@@ -1114,6 +1192,7 @@ function countBy(items, getKey) {
 function buildData(startMs, endMs, bucket, pagination) {
   const diagnostics = ingestChangedSessionFiles();
   const requests = queryTokenRecords(startMs, endMs);
+  const excludedSystemRecords = countExcludedSystemRecords(startMs, endMs);
 
   const requestUsage = requests.reduce((sum, req) => addUsage(sum, req.usage), emptyUsage());
   const costSummary = summarizeCost(requests);
@@ -1137,7 +1216,8 @@ function buildData(startMs, endMs, bucket, pagination) {
     diagnostics: {
       ...diagnostics,
       request_records: requests.length,
-      session_token_count_records: requests.length
+      session_token_count_records: requests.length,
+      excluded_system_token_count_records: excludedSystemRecords
     },
     summary: {
       request_records: requests.length,
@@ -1161,7 +1241,7 @@ function buildData(startMs, endMs, bucket, pagination) {
       stream_observed_records: streamObservedRecords,
       service_tier_known_records: serviceTierKnownRecords
     },
-    buckets: summarizeBuckets(requests, bucket),
+    buckets: summarizeBuckets(requests, bucket, startMs, endMs),
     data_quality: {
       primary_records: 'codex_session_token_count_events',
       token_usage: 'codex_session_last_token_usage',
@@ -1172,6 +1252,7 @@ function buildData(startMs, endMs, bucket, pagination) {
       service_tier: 'codex_session_request_service_tier_when_present_no_current_config_backfill',
       cost_estimate: 'local_token_rate_estimate_cache_write_lower_bound_when_usage_missing',
       turn_duration_ms_estimate: 'local_session_task_started_to_task_complete',
+      excluded_system_records: 'breakdownless_token_count_events_from_compaction_abort_or_rollback',
       excluded_sources: ['logs_2.sqlite', 'raw_sse', 'codex_otel']
     },
     counts: {
@@ -1190,6 +1271,13 @@ function buildData(startMs, endMs, bucket, pagination) {
   };
 }
 
+function boundedInteger(value, fallback, min, max) {
+  if (value == null || value === '') return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(parsed)));
+}
+
 function parseRange(searchParams) {
   const now = Date.now();
   const endMsParam = searchParams.get('end_ms');
@@ -1205,8 +1293,8 @@ function parseRange(searchParams) {
     startMs: Math.max(0, start),
     endMs: Math.max(start, end),
     bucket: ['hour', 'day', 'week'].includes(searchParams.get('bucket')) ? searchParams.get('bucket') : 'day',
-    page: Math.max(1, Number(searchParams.get('page') || 1)),
-    pageSize: Math.min(100, Math.max(5, Number(searchParams.get('page_size') || 7)))
+    page: boundedInteger(searchParams.get('page'), 1, 1, Number.MAX_SAFE_INTEGER),
+    pageSize: boundedInteger(searchParams.get('page_size'), 7, 5, 100)
   };
 }
 
