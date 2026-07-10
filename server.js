@@ -1294,7 +1294,7 @@ function parseRange(searchParams) {
     endMs: Math.max(start, end),
     bucket: ['hour', 'day', 'week'].includes(searchParams.get('bucket')) ? searchParams.get('bucket') : 'day',
     page: boundedInteger(searchParams.get('page'), 1, 1, Number.MAX_SAFE_INTEGER),
-    pageSize: boundedInteger(searchParams.get('page_size'), 7, 5, 100)
+    pageSize: boundedInteger(searchParams.get('page_size'), 6, 5, 100)
   };
 }
 

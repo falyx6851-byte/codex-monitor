@@ -1,6 +1,6 @@
 # Codex Token Monitor
 
-[中文说明](README.zh-CN.md) | English
+[中文说明](README.zh-CN.md) | English | [Changelog / 更新日志](CHANGELOG.md)
 
 Local Codex token and request monitoring dashboard.
 
@@ -250,7 +250,7 @@ Query parameters:
 | `start_ms` | today start in UI | Unix milliseconds |
 | `end_ms` | now | Unix milliseconds |
 | `page` | `1` | Page number |
-| `page_size` | `7` | Page size, clamped to `5..100` |
+| `page_size` | `6` | Page size, clamped to `5..100` |
 | `bucket` | `day` | `hour`, `day`, or `week` |
 
 ## Local Database

@@ -1,6 +1,6 @@
 # Codex Token Monitor
 
-中文说明 | [English](README.md)
+中文说明 | [English](README.md) | [更新日志](CHANGELOG.md)
 
 本项目是一个本地 Codex token 与请求记录监控看板。它读取本机 Codex session JSONL 文件，把 token 使用记录规范化到本项目自己的 SQLite 数据库里，并在本地提供 Web 页面：
 
@@ -248,7 +248,7 @@ GET /api/data
 | `start_ms` | UI 默认当天 0 点 | Unix 毫秒 |
 | `end_ms` | 当前时间 | Unix 毫秒 |
 | `page` | `1` | 页码 |
-| `page_size` | `7` | 每页条数，限制 `5..100` |
+| `page_size` | `6` | 每页条数，限制 `5..100` |
 | `bucket` | `day` | `hour`、`day`、`week` |
 
 ## 本地 SQLite

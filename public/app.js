@@ -150,7 +150,7 @@ function queryUrl() {
   params.set('end_ms', String(end));
   params.set('bucket', selectedBucket(start, end));
   params.set('page', String(state.page));
-  params.set('page_size', els.pageSize.value || '7');
+  params.set('page_size', els.pageSize.value || '6');
   return `/api/data?${params.toString()}`;
 }
 
