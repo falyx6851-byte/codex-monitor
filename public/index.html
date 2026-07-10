@@ -3,69 +3,91 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Codex Token Monitor</title>
+    <meta name="color-scheme" content="light">
+    <title>Codex Monitor</title>
     <link rel="stylesheet" href="/styles.css">
   </head>
   <body>
-    <header class="topbar">
-      <div class="brand">
-        <div class="mark">CTM</div>
-        <div>
-          <h1>Codex Token Monitor</h1>
-          <p id="statusLine">等待采集</p>
+    <header class="masthead">
+      <div class="brand" aria-label="Codex Monitor">
+        <div class="brand-mark" aria-hidden="true">C/</div>
+        <div class="brand-copy">
+          <span class="brand-kicker">LOCAL TELEMETRY</span>
+          <h1>Codex Monitor</h1>
         </div>
       </div>
+
+      <nav class="primary-nav" aria-label="页面导航">
+        <a class="active" href="#overview">运行概览</a>
+        <a href="#requests">请求明细</a>
+      </nav>
+
+      <div class="runtime-status" aria-live="polite">
+        <span class="status-dot" aria-hidden="true"></span>
+        <div>
+          <strong>本地采集运行中</strong>
+          <span id="statusLine">正在连接数据源</span>
+        </div>
+      </div>
+
       <div class="top-actions">
-        <button id="refreshBtn" class="button primary" type="button" title="刷新数据">刷新</button>
-        <button id="exportBtn" class="button" type="button" title="导出当前 JSON">导出</button>
+        <button id="exportBtn" class="button quiet" type="button">导出 JSON</button>
+        <button id="refreshBtn" class="button primary" type="button">刷新数据</button>
       </div>
     </header>
 
-    <nav class="section-tabs" aria-label="页面导航">
-      <a href="#overview">概览</a>
-      <a href="#requests">请求明细</a>
-    </nav>
-
-    <section class="controls">
-      <div class="quick">
-        <button class="chip active" data-days="1" type="button">今日</button>
-        <button class="chip" data-days="7" type="button">7天</button>
-        <button class="chip" data-days="30" type="button">30天</button>
-        <button class="chip" data-days="0" type="button">全部</button>
+    <section class="commandbar" aria-label="查询条件">
+      <div class="range-group">
+        <span class="control-caption">统计周期</span>
+        <div class="segmented" role="group" aria-label="快捷统计周期">
+          <button class="chip active" data-days="1" type="button">今日</button>
+          <button class="chip" data-days="7" type="button">7 天</button>
+          <button class="chip" data-days="30" type="button">30 天</button>
+          <button class="chip" data-days="0" type="button">全部</button>
+        </div>
       </div>
-      <label>
-        <span>开始</span>
-        <input id="startInput" type="datetime-local">
-      </label>
-      <label>
-        <span>结束</span>
-        <input id="endInput" type="datetime-local">
-      </label>
-      <label>
-        <span>每页</span>
+
+      <div class="date-range">
+        <label>
+          <span>开始时间</span>
+          <input id="startInput" type="datetime-local">
+        </label>
+        <span class="range-separator" aria-hidden="true">至</span>
+        <label>
+          <span>结束时间</span>
+          <input id="endInput" type="datetime-local">
+        </label>
+      </div>
+
+      <label class="page-size">
+        <span>每页行数</span>
         <select id="pageSizeInput">
-          <option value="7" selected>7</option>
-          <option value="10">10</option>
-          <option value="25">25</option>
-          <option value="50">50</option>
-          <option value="100">100</option>
+          <option value="7" selected>7 行</option>
+          <option value="10">10 行</option>
+          <option value="25">25 行</option>
+          <option value="50">50 行</option>
+          <option value="100">100 行</option>
         </select>
       </label>
     </section>
 
     <main>
-      <section id="overview" class="metric-grid" aria-label="监控概览"></section>
+      <div id="errorBanner" class="error-banner" role="alert" hidden></div>
+      <section id="overview" class="metric-strip" aria-label="监控概览"></section>
 
-      <section class="panel table-panel" id="requests">
+      <section class="data-workbench" id="requests" aria-labelledby="requestsTitle">
         <div class="panel-head">
-          <div>
-            <h2>请求明细</h2>
-            <span id="requestCount" class="muted">0</span>
+          <div class="panel-title">
+            <span class="section-index" aria-hidden="true">01</span>
+            <div>
+              <h2 id="requestsTitle">请求明细</h2>
+              <span id="requestCount" class="muted">等待数据</span>
+            </div>
           </div>
-          <div class="pager">
-            <button id="prevPageBtn" class="button" type="button">上一页</button>
-            <span id="pageInfo" class="muted">1 / 1</span>
-            <button id="nextPageBtn" class="button" type="button">下一页</button>
+          <div class="pager" aria-label="分页">
+            <button id="prevPageBtn" class="icon-button" type="button" title="上一页" aria-label="上一页">←</button>
+            <span id="pageInfo" class="page-info">1 / 1</span>
+            <button id="nextPageBtn" class="icon-button" type="button" title="下一页" aria-label="下一页">→</button>
           </div>
         </div>
         <div class="table-wrap">
@@ -77,15 +99,15 @@
                 <th>模型</th>
                 <th id="serviceTierHeader" hidden>档位</th>
                 <th>状态</th>
-                <th>输入</th>
-                <th>缓存</th>
-                <th>输出</th>
-                <th>总 token</th>
-                <th>估算费用</th>
-                <th>首输出估算</th>
-                <th>响应耗时估算</th>
-                <th>来源补充</th>
-                <th>详情</th>
+                <th class="num">输入</th>
+                <th class="num">缓存</th>
+                <th class="num">输出</th>
+                <th class="num">总 Token</th>
+                <th class="num">估算费用</th>
+                <th class="num">首输出</th>
+                <th class="num">响应耗时</th>
+                <th>请求来源</th>
+                <th class="action-column"><span class="sr-only">操作</span></th>
               </tr>
             </thead>
             <tbody id="requestRows"></tbody>
@@ -95,9 +117,15 @@
     </main>
 
     <dialog id="detailDialog">
-      <form method="dialog">
-        <button class="close" value="close" title="关闭">×</button>
-      </form>
+      <div class="dialog-head">
+        <div>
+          <span class="brand-kicker">REQUEST PAYLOAD</span>
+          <h2>请求记录详情</h2>
+        </div>
+        <form method="dialog">
+          <button class="close icon-button" value="close" title="关闭" aria-label="关闭">×</button>
+        </form>
+      </div>
       <pre id="detailText"></pre>
     </dialog>
 

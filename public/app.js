@@ -21,6 +21,7 @@ const els = {
   prevPage: document.getElementById('prevPageBtn'),
   nextPage: document.getElementById('nextPageBtn'),
   pageInfo: document.getElementById('pageInfo'),
+  errorBanner: document.getElementById('errorBanner'),
   dialog: document.getElementById('detailDialog'),
   detail: document.getElementById('detailText')
 };
@@ -156,17 +157,25 @@ function queryUrl() {
 }
 
 async function loadData() {
-  els.status.textContent = '采集中…';
-  const res = await fetch(queryUrl(), { cache: 'no-store' });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  state.data = await res.json();
-  state.page = state.data.pagination?.page || state.page;
-  render();
+  document.body.classList.add('is-loading');
+  els.refresh.disabled = true;
+  els.status.textContent = '正在同步本地 session 数据';
+  els.errorBanner.hidden = true;
+  try {
+    const res = await fetch(queryUrl(), { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    state.data = await res.json();
+    state.page = state.data.pagination?.page || state.page;
+    render();
+  } finally {
+    document.body.classList.remove('is-loading');
+    els.refresh.disabled = false;
+  }
 }
 
-function metric(label, value, sub, accent) {
+function metric(label, value, sub, accent, index) {
   return `<article class="metric ${accent}">
-    <div class="label">${escapeHtml(label)}</div>
+    <div class="metric-head"><span class="label">${escapeHtml(label)}</span><span class="index">0${index}</span></div>
     <div class="value">${escapeHtml(value)}</div>
     <div class="sub">${escapeHtml(sub || '')}</div>
   </article>`;
@@ -181,16 +190,17 @@ function renderMetrics(data) {
     ? `${fmtNum(cost.lower_bound_records)} 条缺缓存写入量`
     : `${fmtNum(cost.priced_records)} 条已计价`;
   els.metrics.innerHTML = [
-    metric('请求记录', fmtNum(data.summary.request_records), `成功 ${fmtNum(success)} / 失败 ${fmtNum(failed)}`, 'accent-green'),
-    metric('总 Token', fmtCompact(usage.total_tokens), 'input + output', 'accent-cyan'),
-    metric('缓存命中率', fmtPercent(data.summary.cache_hit_rate), `${fmtCompact(usage.cached_input_tokens)} cached`, 'accent-violet'),
-    metric('输出 Token', fmtCompact(usage.output_tokens), 'last output tokens', 'accent-amber'),
-    metric('估算金额', fmtCostEstimate(cost), costSub, 'accent-amber'),
+    metric('请求记录', fmtNum(data.summary.request_records), `成功 ${fmtNum(success)} · 失败 ${fmtNum(failed)}`, 'accent-green', 1),
+    metric('总 Token', fmtCompact(usage.total_tokens), '输入与输出合计', 'accent-cyan', 2),
+    metric('缓存命中率', fmtPercent(data.summary.cache_hit_rate), `${fmtCompact(usage.cached_input_tokens)} 缓存 Token`, 'accent-violet', 3),
+    metric('输出 Token', fmtCompact(usage.output_tokens), '请求输出合计', 'accent-blue', 4),
+    metric('估算金额', fmtCostEstimate(cost), costSub, 'accent-amber', 5),
     metric(
       '平均响应耗时',
       fmtMs(data.summary.average_request_duration_ms_estimate ?? data.summary.average_turn_elapsed_ms_estimate),
       `首输出 ${fmtMs(data.summary.average_first_output_ms_estimate)}`,
-      'accent-red'
+      'accent-red',
+      6
     )
   ].join('');
 }
@@ -312,9 +322,10 @@ function renderRequests() {
       },
       source_context: r.source_context
     }, null, 2);
-    return `<tr>
-      <td class="mono">${fmtDate(r.completed_ms)}</td>
-      <td class="mono">${escapeHtml(clampText(displayId || '—', 24))}</td>
+    const failed = String(r.status || 'success').toLowerCase() === 'failed';
+    return `<tr class="${failed ? 'failed-row' : ''}">
+      <td class="mono" title="${escapeHtml(fmtFullDate(r.completed_ms))}">${fmtDate(r.completed_ms)}</td>
+      <td class="mono" title="${escapeHtml(displayId || '')}">${escapeHtml(clampText(displayId || '—', 24))}</td>
       <td><span class="pill">${escapeHtml(r.model || 'unknown')}</span></td>
       ${showServiceTier ? `<td>${serviceTierPill(r)}</td>` : ''}
       <td>${statusPill(r)}</td>
@@ -326,7 +337,7 @@ function renderRequests() {
       <td class="num" title="${escapeHtml(r.first_output_basis || '')}">${fmtMs(r.first_output_ms_estimate)}</td>
       <td class="num" title="${escapeHtml(durationTitle(r))}">${fmtMs(effectiveDurationMs(r))}</td>
       <td class="preview"><span title="${escapeHtml(r.source_context?.cwd || '')}">${escapeHtml(clampText(source, 80))}</span></td>
-      <td class="preview"><button type="button" data-detail="${escapeHtml(detail)}">查看</button></td>
+      <td class="preview action-column"><button type="button" data-detail="${escapeHtml(detail)}">打开</button></td>
     </tr>`;
   }).join('') || `<tr><td colspan="${showServiceTier ? 14 : 13}" class="muted">暂无请求记录。</td></tr>`;
 }
@@ -346,7 +357,7 @@ function render() {
   renderMetrics(data);
   renderRequests();
   bindDetailButtons();
-  els.status.textContent = `更新 ${fmtFullDate(data.generated_at)} / session token_count 口径`;
+  els.status.textContent = `更新于 ${fmtFullDate(data.generated_at)} · session token_count`;
 }
 
 function resetPageAndLoad() {
@@ -392,7 +403,11 @@ els.nextPage.addEventListener('click', () => {
 });
 
 function showError(error) {
-  els.status.textContent = `错误：${error.message}`;
+  document.body.classList.remove('is-loading');
+  els.refresh.disabled = false;
+  els.status.textContent = `同步失败 · ${error.message}`;
+  els.errorBanner.textContent = `数据同步失败：${error.message}。现有页面数据已保留。`;
+  els.errorBanner.hidden = false;
   console.error(error);
 }
 
