@@ -195,7 +195,7 @@ function renderMetrics(data) {
     ? `${fmtNum(cost.lower_bound_records)} 条缺缓存写入量`
     : `${fmtNum(cost.priced_records)} 条已计价`;
   els.metrics.innerHTML = [
-    metric('请求记录', fmtNum(data.summary.request_records), `成功 ${fmtNum(success)} · 失败 ${fmtNum(failed)}`, 'accent-green', 1, '⌁'),
+    metric('请求记录', fmtNum(data.summary.request_records), `成功 ${fmtNum(success)} · 失败 ${fmtNum(failed)}`, 'accent-green', 1, '∿'),
     metric('总 Token', fmtCompact(usage.total_tokens), '输入 + 输出合计', 'accent-blue', 2, '▤'),
     metric('缓存命中率', fmtPercent(data.summary.cache_hit_rate), `${fmtCompact(usage.cached_input_tokens)} 缓存 Token`, 'accent-green', 3, '◕'),
     metric('输出 Token', fmtCompact(usage.output_tokens), '请求输出合计', 'accent-cyan', 4, '↑'),
@@ -349,8 +349,8 @@ function shortBucketLabel(label) {
 
 function drawAxes(ctx, width, height, min, max, formatter) {
   const box = { left: 44, right: width - 10, top: 10, bottom: height - 24 };
-  ctx.strokeStyle = '#e1e6e2';
-  ctx.fillStyle = '#7a857e';
+  ctx.strokeStyle = '#e3e6e9';
+  ctx.fillStyle = '#737e89';
   ctx.lineWidth = 1;
   for (let i = 0; i <= 3; i++) {
     const y = box.top + (box.bottom - box.top) * i / 3;
@@ -379,7 +379,7 @@ function drawLineChart(canvas, labels, series, options = {}) {
       : null);
     const finitePoints = points.filter(Boolean);
     if (item.fill && finitePoints.length > 1 && finitePoints.length === points.length) {
-      ctx.save(); ctx.globalAlpha = .09; ctx.fillStyle = item.color;
+      ctx.save(); ctx.globalAlpha = .15; ctx.fillStyle = item.color;
       ctx.beginPath(); ctx.moveTo(points[0].x, box.bottom);
       points.forEach((point) => ctx.lineTo(point.x, point.y));
       ctx.lineTo(points.at(-1).x, box.bottom); ctx.closePath(); ctx.fill(); ctx.restore();
@@ -397,7 +397,7 @@ function drawLineChart(canvas, labels, series, options = {}) {
     finitePoints.forEach((point) => { ctx.beginPath(); ctx.arc(point.x, point.y, 2.4, 0, Math.PI * 2); ctx.fill(); });
   });
 
-  ctx.fillStyle = '#7a857e';
+  ctx.fillStyle = '#737e89';
   const indexes = [...new Set([0, Math.floor((labels.length - 1) / 2), labels.length - 1])];
   indexes.forEach((index) => {
     const text = shortBucketLabel(labels[index]);
@@ -419,7 +419,7 @@ function drawGroupedBars(canvas, labels, series) {
       ctx.fillRect(x, box.bottom - barHeight, Math.max(1, barWidth - 1), barHeight);
     });
   });
-  ctx.fillStyle = '#7a857e';
+  ctx.fillStyle = '#737e89';
   [0, Math.floor((labels.length - 1) / 2), labels.length - 1].forEach((index) => {
     if (index < 0) return;
     ctx.fillText(shortBucketLabel(labels[index]), box.left + groupWidth * index, height - 6);
@@ -449,7 +449,7 @@ function drawDonutChart(canvas, rows, colors) {
   ctx.arc(cx, cy, innerRadius - 1, 0, Math.PI * 2);
   ctx.fillStyle = '#fff';
   ctx.fill();
-  ctx.fillStyle = '#111714';
+  ctx.fillStyle = '#121923';
   ctx.font = '700 15px "Cascadia Code", Consolas, monospace';
   ctx.textAlign = 'center';
   ctx.fillText(fmtNum(total), cx, cy + 5);
@@ -459,7 +459,7 @@ function drawDonutChart(canvas, rows, colors) {
 function renderModelShare(rows) {
   const total = rows.reduce((sum, row) => sum + row.count, 0);
   const visibleRows = rows.slice(0, 5);
-  const colors = ['#2478e8', '#0ba66a', '#15b6d6', '#f08a00', '#7153a6'];
+  const colors = ['#2078ff', '#08a060', '#20c0e8', '#fc9408', '#7153a6'];
   els.modelShare.innerHTML = visibleRows.map((row, index) => {
     const share = total ? row.count / total : 0;
     return `<div class="model-row">
@@ -487,25 +487,25 @@ function renderAnalytics() {
   els.periodCount.textContent = `${fmtNum(buckets.length)} 个周期 · ${bucketLabels[data?.range?.bucket] || '天'}粒度`;
 
   drawLineChart(document.getElementById('tokenTrendChart'), labels, [
-    { values: buckets.map((b) => b.usage.total_tokens), color: '#0b9b5b', fill: true }
+    { values: buckets.map((b) => b.usage.total_tokens), color: '#08a060', fill: true }
   ]);
   drawLineChart(document.getElementById('successTrendChart'), labels, [
-    { values: buckets.map((b) => b.success_rate), color: '#0b9b5b' },
-    { values: buckets.map((b) => Number.isFinite(b.success_rate) ? 1 - b.success_rate : null), color: '#ce4038' }
+    { values: buckets.map((b) => b.success_rate), color: '#08a060' },
+    { values: buckets.map((b) => Number.isFinite(b.success_rate) ? 1 - b.success_rate : null), color: '#f83438' }
   ], { min: 0, max: 1, axisFormatter: (value) => `${Math.round(value * 100)}%` });
   drawGroupedBars(document.getElementById('tokenMixChart'), labels, [
-    { values: buckets.map((b) => b.usage.input_tokens), color: '#2867b2' },
-    { values: buckets.map((b) => b.usage.cached_input_tokens), color: '#0b9b5b' },
-    { values: buckets.map((b) => b.usage.output_tokens), color: '#08a6bd' }
+    { values: buckets.map((b) => b.usage.input_tokens), color: '#2078ff' },
+    { values: buckets.map((b) => b.usage.cached_input_tokens), color: '#08a060' },
+    { values: buckets.map((b) => b.usage.output_tokens), color: '#20c0e8' }
   ]);
   drawLineChart(document.getElementById('costTrendChart'), labels, [
-    { values: buckets.map((b) => b.estimated_cost?.amount_usd || 0), color: '#f08a00', fill: true }
+    { values: buckets.map((b) => b.estimated_cost?.amount_usd || 0), color: '#fc9408', fill: true }
   ], { axisFormatter: (value) => {
     const amount = Math.max(0, value);
     return `$${amount.toFixed(amount < 10 ? 1 : 0)}`;
   } });
   drawLineChart(document.getElementById('latencyTrendChart'), labels, [
-    { values: buckets.map((b) => Number.isFinite(b.average_request_duration_ms_estimate) ? b.average_request_duration_ms_estimate / 1000 : null), color: '#2478e8', fill: true }
+    { values: buckets.map((b) => Number.isFinite(b.average_request_duration_ms_estimate) ? b.average_request_duration_ms_estimate / 1000 : null), color: '#2078ff', fill: true }
   ], { axisFormatter: (value) => `${Math.round(value)}s` });
   renderModelShare(data?.counts?.model || []);
 
