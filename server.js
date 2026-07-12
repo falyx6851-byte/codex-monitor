@@ -25,6 +25,7 @@ const PORT = Number(process.env.CODEX_TOKEN_MONITOR_PORT || process.env.PORT || 
 const HOST = process.env.CODEX_TOKEN_MONITOR_HOST || '127.0.0.1';
 const CACHE_TTL_MS = Number(process.env.CODEX_TOKEN_MONITOR_CACHE_MS || 8000);
 const MAX_REQUEST_DURATION_ESTIMATE_MS = 10 * 60 * 1000;
+const SESSION_PARSER_VERSION = 2;
 
 const cache = new Map();
 
@@ -148,6 +149,8 @@ function normalizeServiceTier(value) {
 function extractServiceTier(payload) {
   if (!payload || typeof payload !== 'object') return null;
   const candidates = [
+    ['payload.thread_settings.service_tier', payload.thread_settings?.service_tier],
+    ['payload.thread_settings.serviceTier', payload.thread_settings?.serviceTier],
     ['payload.service_tier', payload.service_tier],
     ['payload.serviceTier', payload.serviceTier],
     ['payload.info.service_tier', payload.info?.service_tier],
@@ -200,7 +203,14 @@ function resolvePricing(model) {
   return null;
 }
 
-function estimateCost(usage, model) {
+function pricingServiceTier(value) {
+  const tier = normalizeServiceTier(value);
+  if (tier === 'priority' || tier === 'fast') return 'priority';
+  if (tier === 'flex') return 'flex';
+  return 'standard';
+}
+
+function estimateCost(usage, model, serviceTier) {
   const resolved = resolvePricing(model);
   if (!resolved) {
     return {
@@ -216,9 +226,34 @@ function estimateCost(usage, model) {
   const cachedInputTokens = Math.min(inputTokens, Math.max(0, finiteOrZero(usage?.cached_input_tokens)));
   const uncachedInputTokens = Math.max(0, inputTokens - cachedInputTokens);
   const outputTokens = Math.max(0, finiteOrZero(usage?.output_tokens));
-  const threshold = Number(pricingConfig.long_context_threshold_tokens || 270000);
-  const useLongContext = resolved.pricing.long_context && inputTokens > threshold;
-  const rates = useLongContext ? resolved.pricing.long_context : resolved.pricing;
+  const threshold = Number(pricingConfig.long_context_threshold_tokens || 272000);
+  const selectedServiceTier = pricingServiceTier(serviceTier);
+  const overLongContextThreshold = inputTokens > threshold;
+  let rates = resolved.pricing;
+  let rateTier = 'standard';
+  if (selectedServiceTier === 'priority') {
+    if (overLongContextThreshold || !resolved.pricing.priority) {
+      return {
+        currency: pricingConfig.currency || 'USD',
+        amount_usd: null,
+        known: false,
+        model_key: resolved.key,
+        tier: 'priority',
+        service_tier: selectedServiceTier,
+        reason: overLongContextThreshold
+          ? 'priority_long_context_pricing_unavailable'
+          : 'missing_priority_pricing'
+      };
+    }
+    rates = resolved.pricing.priority;
+    rateTier = 'priority';
+  } else if (selectedServiceTier === 'flex' && resolved.pricing.flex) {
+    rates = resolved.pricing.flex;
+    rateTier = 'flex';
+  } else if (overLongContextThreshold && resolved.pricing.long_context) {
+    rates = resolved.pricing.long_context;
+    rateTier = 'standard_long_context';
+  }
   const cacheWriteRate = optionalFinite(rates.cache_write_input_per_1m);
   const reportedCacheWriteTokens = optionalFinite(usage?.cache_write_input_tokens);
   const cacheWriteTokens = cacheWriteRate == null || reportedCacheWriteTokens == null
@@ -243,7 +278,8 @@ function estimateCost(usage, model) {
     estimate_kind: cacheWriteMissing ? 'lower_bound' : 'token_rate_estimate',
     reason: cacheWriteMissing ? 'cache_write_tokens_unavailable_in_codex_session' : null,
     model_key: resolved.key,
-    tier: useLongContext ? 'long_context' : 'standard',
+    tier: rateTier,
+    service_tier: selectedServiceTier,
     source: pricingConfig.source || '',
     updated_at: pricingConfig.updated_at || '',
     input_tokens_billed_at_input_rate: regularInputTokens,
@@ -525,6 +561,7 @@ function initDb() {
   ensureColumn(database, 'token_records', 'service_tier_source', 'TEXT');
   ensureColumn(database, 'token_records', 'cache_write_input_tokens', 'INTEGER');
   ensureColumn(database, 'token_records', 'total_cache_write_input_tokens_snapshot', 'INTEGER');
+  ensureColumn(database, 'session_files', 'parser_version', 'INTEGER NOT NULL DEFAULT 1');
   return database;
 }
 
@@ -867,6 +904,7 @@ function sqliteValue(value) {
 
 function fileNeedsIngest(known, stat) {
   if (!known) return true;
+  if (Number(known.parser_version || 1) !== SESSION_PARSER_VERSION) return true;
   if (Number(known.file_size) !== Number(stat.size)) return true;
   return Math.abs(Number(known.mtime_ms) - Number(stat.mtimeMs)) > 1;
 }
@@ -874,7 +912,7 @@ function fileNeedsIngest(known, stat) {
 function ingestChangedSessionFiles() {
   const startedAt = Date.now();
   const files = walkFiles(SESSIONS_DIR, (file) => file.endsWith('.jsonl'));
-  const knownStmt = db.prepare('SELECT file_size, mtime_ms FROM session_files WHERE file_path = ?');
+  const knownStmt = db.prepare('SELECT file_size, mtime_ms, parser_version FROM session_files WHERE file_path = ?');
   const changed = [];
   let statErrors = 0;
 
@@ -919,9 +957,10 @@ function ingestChangedSessionFiles() {
         scanned_lines,
         malformed_lines,
         token_events,
-        parsed_records
+        parsed_records,
+        parser_version
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(file_path) DO UPDATE SET
         file_size = excluded.file_size,
         mtime_ms = excluded.mtime_ms,
@@ -931,7 +970,8 @@ function ingestChangedSessionFiles() {
         scanned_lines = excluded.scanned_lines,
         malformed_lines = excluded.malformed_lines,
         token_events = excluded.token_events,
-        parsed_records = excluded.parsed_records
+        parsed_records = excluded.parsed_records,
+        parser_version = excluded.parser_version
     `);
 
     let inTransaction = false;
@@ -939,7 +979,11 @@ function ingestChangedSessionFiles() {
       db.exec('BEGIN IMMEDIATE');
       inTransaction = true;
       for (const item of parsed) {
-        if (item.known && Number(item.stat.size) < Number(item.known.file_size)) {
+        if (
+          item.known &&
+          (Number(item.stat.size) < Number(item.known.file_size) ||
+            Number(item.known.parser_version || 1) !== SESSION_PARSER_VERSION)
+        ) {
           const result = deleteFileRecordsStmt.run(item.file);
           deletedRecords += Number(result?.changes || 0);
         }
@@ -954,7 +998,8 @@ function ingestChangedSessionFiles() {
             0,
             0,
             0,
-            0
+            0,
+            SESSION_PARSER_VERSION
           );
           continue;
         }
@@ -972,7 +1017,8 @@ function ingestChangedSessionFiles() {
           item.parsed.diagnostics.scanned_lines,
           item.parsed.diagnostics.malformed_lines,
           item.parsed.diagnostics.token_events,
-          item.parsed.diagnostics.parsed_records
+          item.parsed.diagnostics.parsed_records,
+          SESSION_PARSER_VERSION
         );
       }
       db.exec('COMMIT');
@@ -1048,7 +1094,7 @@ function rowToRequest(row) {
     total_tokens: row.total_tokens ?? 0
   };
   const status = normalizeRecordStatus(row.status, row.error_reason);
-  const costEstimate = estimateCost(usage, row.model);
+  const costEstimate = estimateCost(usage, row.model, row.service_tier);
   return {
     id: row.record_id,
     record_id: row.record_id,
@@ -1249,7 +1295,7 @@ function buildData(startMs, endMs, bucket, pagination) {
       duration_ms_estimate: 'local_observed_model_request_start_to_token_count',
       first_output_ms_estimate: 'local_observed_model_request_start_to_first_response_item',
       stream_observed: 'local_response_item_count_before_token_count_not_official_stream_flag',
-      service_tier: 'codex_session_request_service_tier_when_present_no_current_config_backfill',
+      service_tier: 'codex_session_thread_settings_service_tier_carried_to_following_token_count',
       cost_estimate: 'local_token_rate_estimate_cache_write_lower_bound_when_usage_missing',
       turn_duration_ms_estimate: 'local_session_task_started_to_task_complete',
       excluded_system_records: 'breakdownless_token_count_events_from_compaction_abort_or_rollback',
@@ -1404,7 +1450,16 @@ const server = http.createServer((req, res) => {
   sendStatic(res, url.pathname);
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`Codex token monitor: http://${HOST}:${PORT}`);
-  console.log(`CODEX_HOME: ${CODEX_HOME}`);
-});
+if (require.main === module) {
+  server.listen(PORT, HOST, () => {
+    console.log(`Codex token monitor: http://${HOST}:${PORT}`);
+    console.log(`CODEX_HOME: ${CODEX_HOME}`);
+  });
+}
+
+module.exports = {
+  estimateCost,
+  extractServiceTier,
+  parseSessionFile,
+  pricingServiceTier
+};

@@ -15,7 +15,8 @@
   ],
   "scripts": {
     "start": "node --no-warnings server.js",
-    "report": "node scripts/codex-token-report.mjs"
+    "report": "node scripts/codex-token-report.mjs",
+    "test": "node --test test/*.test.js"
   },
   "engines": {
     "node": ">=24"

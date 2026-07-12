@@ -222,12 +222,13 @@ Notes:
 
 - `reasoning_output_tokens` is already included in output tokens.
 - `cached_input_tokens` is already included in input tokens.
-- GPT-5.6 cache writes are billed at `1.25x` the regular input rate. If a Codex session does not expose `cache_write_tokens`, the UI prices the unknown portion at the regular input rate; the remaining difference is cache-write tokens multiplied by the cache-write rate minus the regular input rate.
-- Current Codex model metadata reports a `372,000` total GPT-5.6 context window and a `95%` effective window, producing the session value `model_context_window=353,400`. OpenAI's current GPT-5.6 pricing table has no long-context surcharge tier, so this project does not switch GPT-5.6 to a higher rate above `272K`.
+- GPT-5.6 cache writes use the official cache-write rate for the selected service tier. If a Codex session does not expose `cache_write_tokens`, the estimate is marked as a lower bound.
+- `thread_settings_applied.thread_settings.service_tier=priority/fast` uses official Priority rates; `default/standard` uses Standard rates. The setting is carried forward to following request-level `token_count` records.
+- GPT-5.6 Standard requests above `272K` input tokens use the official long-context rates. Priority does not publish a long-context tier, so those records are left unpriced instead of guessed.
 - Records without input/output breakdown are not counted as priced records.
 - This is not an OpenAI invoice or billing API result.
 
-Configured models are `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`; the official `gpt-5.6` alias resolves to Sol pricing. Rate source: `https://developers.openai.com/api/docs/pricing`.
+Configured models include explicit Standard and Priority rates; the official `gpt-5.6` alias resolves to Sol pricing. Rate sources: `https://developers.openai.com/api/docs/pricing` and `https://openai.com/api-priority-processing/`.
 
 ## API
 
@@ -265,7 +266,7 @@ Ingestion is on-demand:
 
 1. `/api/data` is requested.
 2. The server scans `sessions/**/*.jsonl`.
-3. It compares file `size` and `mtime`.
+3. It compares file `size`, `mtime`, and parser version.
 4. Only changed files are parsed.
 5. Normalized records are inserted into local SQLite.
 
@@ -316,7 +317,7 @@ data/
 - No official per-request HTTP status unless the session JSONL contains it.
 - No official TTFT.
 - No request IP.
-- No historical per-request Fast state unless the session JSONL writes `service_tier` / `serviceTier` for that request. The current `config.toml` only describes the current default and is not used to backfill historical requests.
+- Fast can only be determined for periods where session JSONL writes `thread_settings.service_tier` / `serviceTier`; the current `config.toml` is not used to infer historical requests.
 - No ChatGPT OAuth quota percentage.
 - No OpenAI organization usage/cost API integration.
 - No `logs_2.sqlite` ingestion.

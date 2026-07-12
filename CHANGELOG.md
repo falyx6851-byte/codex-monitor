@@ -4,6 +4,12 @@ All notable changes to this project are recorded here.
 
 本文件记录项目的重要功能和统计口径变更。
 
+## Unreleased
+
+- 从 session JSONL 的 `thread_settings_applied.thread_settings.service_tier` 识别标准与 Fast / Priority 请求，不读取 `logs_2.sqlite`。
+- 请求列表和详情增加 Fast 标签，并按官方标准、长上下文与 Priority 费率重新估算金额。
+- 增加解析器版本迁移，仅重新导入仍存在的 session 文件，保留缺少原始 JSONL 的旧历史记录。
+
 ## [0.3.0] - 2026-07-10
 
 ### 中文

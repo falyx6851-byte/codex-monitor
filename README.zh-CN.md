@@ -220,12 +220,13 @@ row.payload.info.last_token_usage
 
 - `reasoning_output_tokens` 已包含在输出 token 中，不重复加总。
 - `cached_input_tokens` 已包含在输入 token 中，不重复加总。
-- GPT-5.6 的缓存写入按普通输入费率的 `1.25x` 计费。若 session 没有提供 `cache_write_tokens`，页面把未知部分暂按普通输入费率展示估算值；实际差额为缓存写入 token 乘以“缓存写入价减普通输入价”。
-- 当前 Codex 模型元数据报告 GPT-5.6 总上下文窗口为 `372,000`，按 `95%` 有效比例写入 session 的 `model_context_window` 为 `353,400`。OpenAI 当前 GPT-5.6 价格表没有长上下文加价档，超过 `272K` 不会在本项目中自动切换高价。
+- GPT-5.6 的缓存写入按对应服务档位的官方 `cache write` 费率计费。若 session 没有提供 `cache_write_tokens`，金额标记为下限。
+- `thread_settings_applied.thread_settings.service_tier=priority/fast` 按 Fast / Priority 官方费率；`default/standard` 按标准费率。档位会沿用到后续的请求级 `token_count`。
+- GPT-5.6 标准请求超过 `272K` 输入 token 时切换官方长上下文费率。Priority 官方表不支持该长上下文档，此类记录不猜测金额。
 - 只有总 token、没有输入/输出拆分的异常记录不计入已计价记录。
 - 这不是 OpenAI 官方账单，也不是 billing API 返回值。
 
-当前配置包含 `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna`；官方 `gpt-5.6` 别名按 Sol 费率解析。费率来源：`https://developers.openai.com/api/docs/pricing`。
+当前配置包含标准与 Priority 的显式模型费率；官方 `gpt-5.6` 别名按 Sol 费率解析。费率来源：`https://developers.openai.com/api/docs/pricing` 和 `https://openai.com/api-priority-processing/`。
 
 ## 本地 API
 
@@ -263,7 +264,7 @@ data/codex-token-monitor.sqlite
 
 1. 页面或 API 请求 `/api/data`。
 2. 服务扫描 `sessions/**/*.jsonl`。
-3. 比较文件 `size` 与 `mtime`。
+3. 比较文件 `size`、`mtime` 与解析器版本。
 4. 只解析新增或变化文件。
 5. 写入本项目 SQLite。
 
@@ -314,7 +315,7 @@ data/
 - 没有官方单请求 HTTP status，除非 session JSONL 自己记录。
 - 没有官方 TTFT。
 - 没有请求 IP。
-- 没有历史请求 Fast 开关，除非 session JSONL 为该请求写出 `service_tier` / `serviceTier`。当前 `config.toml` 只代表当前默认配置，不用于反推历史请求。
+- 只有 session JSONL 写出 `thread_settings.service_tier` / `serviceTier` 的时段能判断 Fast；当前 `config.toml` 不用于反推历史请求。
 - 不读取 ChatGPT OAuth 额度百分比。
 - 不接 OpenAI 组织级 Usage / Costs API。
 - 不读取 `logs_2.sqlite`。

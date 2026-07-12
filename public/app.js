@@ -223,6 +223,11 @@ function serviceTierPill(record) {
   return `<span class="pill ${klass}" title="请求级 service_tier=${escapeHtml(tier)}">${escapeHtml(label)}</span>`;
 }
 
+function serviceTierLabel(value) {
+  const tier = String(value || '').trim().toLowerCase();
+  return { fast: 'Fast', priority: 'Fast', default: '标准', standard: '标准', flex: 'Flex' }[tier] || tier || '未知';
+}
+
 function displayRecordId(recordId) {
   return String(recordId || '').replace(/^session-token-/, '');
 }
@@ -314,7 +319,7 @@ function renderDetail(record) {
         ['响应耗时', fmtMs(effectiveDurationMs(record))], ['估算费用', fmtMoney(record.cost_estimate?.amount_usd)]
       ])}</section>
       <section class="detail-section"><h3>来源上下文</h3>${detailList([
-        ['会话来源', sourceLabel(record.source_context)], ['服务档位', record.service_tier || '未知'],
+        ['会话来源', sourceLabel(record.source_context)], ['服务档位', serviceTierLabel(record.service_tier)],
         ['上下文窗口', fmtNum(record.model_context_window)], ['Turn', String(record.turn_sequence ?? '—')]
       ])}</section>
     </div>
