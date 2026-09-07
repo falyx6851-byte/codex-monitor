@@ -6,6 +6,11 @@ All notable changes to this project are recorded here.
 
 ## Unreleased
 
+- 2026-09-07：新增 GPT-6 Astra 识别与标准 / Fast / Flex 计价，同步 GPT-5.6 最新官方费率。
+- 支持新模型超过 272K 输入的 Fast / Flex 长上下文费率；未知服务档位不再误按标准价计费。
+- 兼容模型名称大小写和已知推理强度后缀；新增模型切换、缓存缺失、长上下文边界和旧模型回归测试。
+- 明确所有历史记录按当前价格快照重估，不等于历史账单。
+
 - 从 session JSONL 的 `thread_settings_applied.thread_settings.service_tier` 识别标准与 Fast / Priority 请求，不读取 `logs_2.sqlite`。
 - 请求列表和详情增加 Fast 标签，并按官方标准、长上下文与 Priority 费率重新估算金额。
 - 增加解析器版本迁移，仅重新导入仍存在的 session 文件，保留缺少原始 JSONL 的旧历史记录。

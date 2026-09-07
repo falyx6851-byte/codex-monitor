@@ -6,7 +6,7 @@ Local Codex token and request monitoring dashboard.
 
 This project reads Codex session JSONL files from your local machine, normalizes token usage records into a local SQLite database, and serves a dashboard at `http://127.0.0.1:4127`.
 
-The pricing configuration supports GPT-5.6 Sol, Terra, Luna, and the `gpt-5.6` alias.
+The pricing configuration supports GPT-6 Astra and GPT-5.6 Sol, Terra, Luna with Standard, Fast, and Flex rates, plus the `gpt-5.6` alias.
 
 It is intentionally local-first:
 
@@ -209,7 +209,7 @@ If no explicit HTTP status or error code is present in the session JSONL, the pr
 
 ## Cost Semantics
 
-Costs are estimates from `pricing.json`. The complete GPT-5.6 formula is:
+Costs are estimates from `pricing.json`. The complete GPT-6 Astra / GPT-5.6 formula is:
 
 ```text
 regular_input_tokens * input_rate
@@ -222,13 +222,24 @@ Notes:
 
 - `reasoning_output_tokens` is already included in output tokens.
 - `cached_input_tokens` is already included in input tokens.
-- GPT-5.6 cache writes use the official cache-write rate for the selected service tier. If a Codex session does not expose `cache_write_tokens`, the estimate is marked as a lower bound.
+- GPT-6 Astra / GPT-5.6 cache writes use the official cache-write rate for the selected service tier. If a Codex session does not expose `cache_write_tokens`, the estimate is marked as a lower bound.
 - `thread_settings_applied.thread_settings.service_tier=priority/fast` uses official Priority rates; `default/standard` uses Standard rates. The setting is carried forward to following request-level `token_count` records.
-- GPT-5.6 Standard requests above `272K` input tokens use the official long-context rates. Priority does not publish a long-context tier, so those records are left unpriced instead of guessed.
+- GPT-6 Astra / GPT-5.6 requests above `272K` input tokens use long-context rates for the entire request in Standard, Fast, and Flex. Unconfigured models or service tiers stay unpriced instead of falling back to Standard.
 - Records without input/output breakdown are not counted as priced records.
 - This is not an OpenAI invoice or billing API result.
 
-Configured models include explicit Standard and Priority rates; the official `gpt-5.6` alias resolves to Sol pricing. Rate sources: `https://developers.openai.com/api/docs/pricing` and `https://openai.com/api-priority-processing/`.
+Rates verified on **2026-09-07**. `gpt-6-astra` resolves to Astra pricing and `gpt-5.6` resolves to Sol. Model matching accepts case differences and known effort suffixes such as `(xhigh)` and `-max`, while preserving the original display name. Unknown GPT-6 variants are not assumed to be Astra.
+
+All requests, including historical requests, are revalued using the current pricing snapshot; historical billing rates are not reconstructed. GPT-5.6 Sol promotional pricing is available at least through 2026-11-21 and should be rechecked then. Regional processing uplifts and non-token tool fees are excluded.
+
+| Model | Standard input | Cache read | Cache write | Output |
+| --- | ---: | ---: | ---: | ---: |
+| GPT-6 Astra | $10 | $1 | $12.5 | $50 |
+| GPT-5.6 Sol | $4 | $0.4 | $5 | $20 |
+| GPT-5.6 Terra | $2 | $0.2 | $2.5 | $12 |
+| GPT-5.6 Luna | $0.2 | $0.02 | $0.25 | $1.2 |
+
+USD per million tokens, short-context Standard rates. Fast is 2x the applicable Standard rates and Flex is 0.5x. Long context doubles input/cache rates and multiplies output rates by 1.5. Sources: [official pricing](https://developers.openai.com/api/docs/pricing), [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra).
 
 ## API
 

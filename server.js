@@ -184,7 +184,7 @@ function loadPricing() {
       currency: 'USD',
       source: '',
       updated_at: '',
-      long_context_threshold_tokens: 270000,
+      long_context_threshold_tokens: 272000,
       models: {},
       aliases: {}
     };
@@ -194,7 +194,9 @@ function loadPricing() {
 const pricingConfig = loadPricing();
 
 function resolvePricing(model) {
-  const raw = String(model || '').trim();
+  // Strip only known effort decorations; never guess an unknown model family.
+  const raw = String(model || '').trim().toLowerCase()
+    .replace(/(?:\((?:none|minimal|low|medium|high|xhigh|max|ultra)\)|-(?:none|minimal|low|medium|high|xhigh|max|ultra))$/, '');
   if (!raw) return null;
   const exact = pricingConfig.models?.[raw];
   if (exact) return { key: raw, pricing: exact };
@@ -206,8 +208,8 @@ function resolvePricing(model) {
 function pricingServiceTier(value) {
   const tier = normalizeServiceTier(value);
   if (tier === 'priority' || tier === 'fast') return 'priority';
-  if (tier === 'flex') return 'flex';
-  return 'standard';
+  if (!tier || ['auto', 'default', 'standard'].includes(tier)) return 'standard';
+  return tier;
 }
 
 function estimateCost(usage, model, serviceTier) {
@@ -231,25 +233,24 @@ function estimateCost(usage, model, serviceTier) {
   const overLongContextThreshold = inputTokens > threshold;
   let rates = resolved.pricing;
   let rateTier = 'standard';
-  if (selectedServiceTier === 'priority') {
-    if (overLongContextThreshold || !resolved.pricing.priority) {
+  if (selectedServiceTier !== 'standard') {
+    const tierRates = ['priority', 'flex'].includes(selectedServiceTier)
+      ? resolved.pricing[selectedServiceTier] : null;
+    if (!tierRates || (overLongContextThreshold && !tierRates.long_context)) {
       return {
         currency: pricingConfig.currency || 'USD',
         amount_usd: null,
         known: false,
         model_key: resolved.key,
-        tier: 'priority',
+        tier: selectedServiceTier,
         service_tier: selectedServiceTier,
-        reason: overLongContextThreshold
-          ? 'priority_long_context_pricing_unavailable'
-          : 'missing_priority_pricing'
+        reason: tierRates && overLongContextThreshold
+          ? `${selectedServiceTier}_long_context_pricing_unavailable`
+          : `missing_${selectedServiceTier}_pricing`
       };
     }
-    rates = resolved.pricing.priority;
-    rateTier = 'priority';
-  } else if (selectedServiceTier === 'flex' && resolved.pricing.flex) {
-    rates = resolved.pricing.flex;
-    rateTier = 'flex';
+    rates = overLongContextThreshold ? tierRates.long_context : tierRates;
+    rateTier = overLongContextThreshold ? `${selectedServiceTier}_long_context` : selectedServiceTier;
   } else if (overLongContextThreshold && resolved.pricing.long_context) {
     rates = resolved.pricing.long_context;
     rateTier = 'standard_long_context';

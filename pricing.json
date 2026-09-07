@@ -1,69 +1,162 @@
 {
   "currency": "USD",
-  "updated_at": "2026-07-12",
+  "updated_at": "2026-09-07",
   "source": "https://developers.openai.com/api/docs/pricing",
-  "priority_source": "https://openai.com/api-priority-processing/",
+  "priority_source": "https://developers.openai.com/api/docs/guides/fast-mode",
   "notes": [
-    "Costs are local estimates from token counts in Codex session JSONL, not official billing records.",
-    "Regular input, cache reads, cache writes, and output are billed with their corresponding per-million-token rates when those usage fields are available.",
-    "GPT-5.6 cache writes are billed at cache_write_input_per_1m. When Codex session JSONL omits cache_write_tokens, the displayed estimate is a lower bound.",
-    "Priority processing is selected only for request records whose session JSONL reports service_tier=priority or service_tier=fast.",
-    "Priority processing uses its explicit official per-model rates and is unavailable for requests estimated above 272K prompt tokens."
+    "Costs are local estimates from Codex session JSONL, not official billing records.",
+    "All requests, including historical requests, are revalued using this current pricing snapshot; historical effective-date billing is not reconstructed.",
+    "Regular input, cache reads, cache writes, and output use their corresponding per-million-token rates.",
+    "GPT-6 Astra and GPT-5.6 cache writes use cache_write_input_per_1m. Missing cache_write_tokens makes the estimate a lower bound.",
+    "Fast mode (formerly Priority) uses explicit priority rates for service_tier=fast or priority; Flex uses explicit flex rates.",
+    "GPT-6 Astra and GPT-5.6 support long-context Standard, Fast, and Flex rates above 272K input tokens. Unconfigured tiers remain unpriced.",
+    "GPT-5.6 Sol promotional pricing is available at least through November 21, 2026. Recheck the official pricing page after that date.",
+    "Regional processing uplifts and non-token tool fees are not included."
   ],
   "long_context_threshold_tokens": 272000,
   "models": {
-    "gpt-5.6-sol": {
-      "input_per_1m": 5,
-      "cached_input_per_1m": 0.5,
-      "cache_write_input_per_1m": 6.25,
-      "output_per_1m": 30,
+    "gpt-6-astra": {
+      "input_per_1m": 10,
+      "cached_input_per_1m": 1,
+      "cache_write_input_per_1m": 12.5,
+      "output_per_1m": 50,
       "long_context": {
-        "input_per_1m": 10,
-        "cached_input_per_1m": 1,
-        "cache_write_input_per_1m": 12.5,
-        "output_per_1m": 45
+        "input_per_1m": 20,
+        "cached_input_per_1m": 2,
+        "cache_write_input_per_1m": 25,
+        "output_per_1m": 75
       },
       "priority": {
-        "input_per_1m": 10,
-        "cached_input_per_1m": 1,
-        "cache_write_input_per_1m": 12.5,
-        "output_per_1m": 60
+        "input_per_1m": 20,
+        "cached_input_per_1m": 2,
+        "cache_write_input_per_1m": 25,
+        "output_per_1m": 100,
+        "long_context": {
+          "input_per_1m": 40,
+          "cached_input_per_1m": 4,
+          "cache_write_input_per_1m": 50,
+          "output_per_1m": 150
+        }
+      },
+      "flex": {
+        "input_per_1m": 5,
+        "cached_input_per_1m": 0.5,
+        "cache_write_input_per_1m": 6.25,
+        "output_per_1m": 25,
+        "long_context": {
+          "input_per_1m": 10,
+          "cached_input_per_1m": 1,
+          "cache_write_input_per_1m": 12.5,
+          "output_per_1m": 37.5
+        }
+      }
+    },
+    "gpt-5.6-sol": {
+      "input_per_1m": 4,
+      "cached_input_per_1m": 0.4,
+      "cache_write_input_per_1m": 5,
+      "output_per_1m": 20,
+      "long_context": {
+        "input_per_1m": 8,
+        "cached_input_per_1m": 0.8,
+        "cache_write_input_per_1m": 10,
+        "output_per_1m": 30
+      },
+      "priority": {
+        "input_per_1m": 8,
+        "cached_input_per_1m": 0.8,
+        "cache_write_input_per_1m": 10,
+        "output_per_1m": 40,
+        "long_context": {
+          "input_per_1m": 16,
+          "cached_input_per_1m": 1.6,
+          "cache_write_input_per_1m": 20,
+          "output_per_1m": 60
+        }
+      },
+      "flex": {
+        "input_per_1m": 2,
+        "cached_input_per_1m": 0.2,
+        "cache_write_input_per_1m": 2.5,
+        "output_per_1m": 10,
+        "long_context": {
+          "input_per_1m": 4,
+          "cached_input_per_1m": 0.4,
+          "cache_write_input_per_1m": 5,
+          "output_per_1m": 15
+        }
       }
     },
     "gpt-5.6-terra": {
-      "input_per_1m": 2.5,
-      "cached_input_per_1m": 0.25,
-      "cache_write_input_per_1m": 3.125,
-      "output_per_1m": 15,
+      "input_per_1m": 2,
+      "cached_input_per_1m": 0.2,
+      "cache_write_input_per_1m": 2.5,
+      "output_per_1m": 12,
       "long_context": {
-        "input_per_1m": 5,
-        "cached_input_per_1m": 0.5,
-        "cache_write_input_per_1m": 6.25,
-        "output_per_1m": 22.5
+        "input_per_1m": 4,
+        "cached_input_per_1m": 0.4,
+        "cache_write_input_per_1m": 5,
+        "output_per_1m": 18
       },
       "priority": {
-        "input_per_1m": 5,
-        "cached_input_per_1m": 0.5,
-        "cache_write_input_per_1m": 6.25,
-        "output_per_1m": 30
+        "input_per_1m": 4,
+        "cached_input_per_1m": 0.4,
+        "cache_write_input_per_1m": 5,
+        "output_per_1m": 24,
+        "long_context": {
+          "input_per_1m": 8,
+          "cached_input_per_1m": 0.8,
+          "cache_write_input_per_1m": 10,
+          "output_per_1m": 36
+        }
+      },
+      "flex": {
+        "input_per_1m": 1,
+        "cached_input_per_1m": 0.1,
+        "cache_write_input_per_1m": 1.25,
+        "output_per_1m": 6,
+        "long_context": {
+          "input_per_1m": 2,
+          "cached_input_per_1m": 0.2,
+          "cache_write_input_per_1m": 2.5,
+          "output_per_1m": 9
+        }
       }
     },
     "gpt-5.6-luna": {
-      "input_per_1m": 1,
-      "cached_input_per_1m": 0.1,
-      "cache_write_input_per_1m": 1.25,
-      "output_per_1m": 6,
+      "input_per_1m": 0.2,
+      "cached_input_per_1m": 0.02,
+      "cache_write_input_per_1m": 0.25,
+      "output_per_1m": 1.2,
       "long_context": {
-        "input_per_1m": 2,
-        "cached_input_per_1m": 0.2,
-        "cache_write_input_per_1m": 2.5,
-        "output_per_1m": 9
+        "input_per_1m": 0.4,
+        "cached_input_per_1m": 0.04,
+        "cache_write_input_per_1m": 0.5,
+        "output_per_1m": 1.7999999999999998
       },
       "priority": {
-        "input_per_1m": 2,
-        "cached_input_per_1m": 0.2,
-        "cache_write_input_per_1m": 2.5,
-        "output_per_1m": 12
+        "input_per_1m": 0.4,
+        "cached_input_per_1m": 0.04,
+        "cache_write_input_per_1m": 0.5,
+        "output_per_1m": 2.4,
+        "long_context": {
+          "input_per_1m": 0.8,
+          "cached_input_per_1m": 0.08,
+          "cache_write_input_per_1m": 1,
+          "output_per_1m": 3.5999999999999996
+        }
+      },
+      "flex": {
+        "input_per_1m": 0.1,
+        "cached_input_per_1m": 0.01,
+        "cache_write_input_per_1m": 0.125,
+        "output_per_1m": 0.6,
+        "long_context": {
+          "input_per_1m": 0.2,
+          "cached_input_per_1m": 0.02,
+          "cache_write_input_per_1m": 0.25,
+          "output_per_1m": 0.8999999999999999
+        }
       }
     },
     "gpt-5.5": {

@@ -23,7 +23,7 @@ http://127.0.0.1:4127
 - 顶部监控卡片：请求数、总 token、缓存命中率、输出 token、估算金额、平均响应耗时。
 - 自定义时间范围与分页。
 - 本地 SQLite 派生统计库，可删除后自动重建。
-- 支持 GPT-5.6 Sol / Terra / Luna 及 `gpt-5.6` 别名的公开标准费率。
+- 支持 GPT-6 Astra、GPT-5.6 Sol / Terra / Luna 的标准、Fast 和 Flex 费率，兼容 `gpt-5.6` 别名。
 - 独立 CLI 统计脚本，可导出 table / JSON / CSV。
 
 ## 环境要求
@@ -207,7 +207,7 @@ row.payload.info.last_token_usage
 
 ## 费用口径
 
-费用来自 `pricing.json` 的本地估算。GPT-5.6 的完整公式是：
+费用来自 `pricing.json` 的本地估算。GPT-6 Astra / GPT-5.6 的完整公式是：
 
 ```text
 普通输入 token * input rate
@@ -220,13 +220,24 @@ row.payload.info.last_token_usage
 
 - `reasoning_output_tokens` 已包含在输出 token 中，不重复加总。
 - `cached_input_tokens` 已包含在输入 token 中，不重复加总。
-- GPT-5.6 的缓存写入按对应服务档位的官方 `cache write` 费率计费。若 session 没有提供 `cache_write_tokens`，金额标记为下限。
+- GPT-6 Astra / GPT-5.6 的缓存写入按对应服务档位的官方 `cache write` 费率计费。若 session 没有提供 `cache_write_tokens`，金额标记为下限。
 - `thread_settings_applied.thread_settings.service_tier=priority/fast` 按 Fast / Priority 官方费率；`default/standard` 按标准费率。档位会沿用到后续的请求级 `token_count`。
-- GPT-5.6 标准请求超过 `272K` 输入 token 时切换官方长上下文费率。Priority 官方表不支持该长上下文档，此类记录不猜测金额。
+- GPT-6 Astra / GPT-5.6 在标准、Fast 和 Flex 档位超过 `272K` 输入 token 时，整条请求切换对应的长上下文费率。未配置费率的模型或服务档位保持未计价，不回退为标准价。
 - 只有总 token、没有输入/输出拆分的异常记录不计入已计价记录。
 - 这不是 OpenAI 官方账单，也不是 billing API 返回值。
 
-当前配置包含标准与 Priority 的显式模型费率；官方 `gpt-5.6` 别名按 Sol 费率解析。费率来源：`https://developers.openai.com/api/docs/pricing` 和 `https://openai.com/api-priority-processing/`。
+费率核对日期：**2026-09-07**。模型 ID `gpt-6-astra` 使用 Astra 费率，`gpt-5.6` 按 Sol 费率解析；兼容大小写及 `(xhigh)`、`-max` 等已知推理强度后缀，保留原始模型名称用于展示。未知 GPT-6 变体不会自动套用 Astra 价格。
+
+所有历史请求也按当前价格快照重新估算，不还原历史账单价格。GPT-5.6 Sol 当前为促销价格，官方说明至少持续至 2026-11-21，届时需要重新核对。估算不包含区域处理附加费及非 token 工具费用。
+
+| 模型 | 标准输入 | 缓存读取 | 缓存写入 | 输出 |
+| --- | ---: | ---: | ---: | ---: |
+| GPT-6 Astra | $10 | $1 | $12.5 | $50 |
+| GPT-5.6 Sol | $4 | $0.4 | $5 | $20 |
+| GPT-5.6 Terra | $2 | $0.2 | $2.5 | $12 |
+| GPT-5.6 Luna | $0.2 | $0.02 | $0.25 | $1.2 |
+
+单位：美元 / 百万 token，表内为短上下文标准价。上述模型的 Fast 为对应标准价 2 倍，Flex 为 0.5 倍；长上下文输入及缓存费率为短上下文 2 倍，输出为 1.5 倍。来源：[OpenAI 官方价格](https://developers.openai.com/api/docs/pricing)、[GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra)。
 
 ## 本地 API
 
