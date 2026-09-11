@@ -5,6 +5,8 @@ const http = require('http');
 const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
+const { StringDecoder } = require('node:string_decoder');
+const { spawn } = require('node:child_process');
 const { URL } = require('url');
 
 let DatabaseSync;
@@ -16,16 +18,17 @@ try {
 
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, 'public');
-const DATA_DIR = path.join(ROOT, 'data');
+const DATA_DIR = process.env.CODEX_TOKEN_MONITOR_DATA_DIR || path.join(ROOT, 'data');
 const DB_FILE = path.join(DATA_DIR, 'codex-token-monitor.sqlite');
 const PRICING_FILE = path.join(ROOT, 'pricing.json');
 const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
 const SESSIONS_DIR = path.join(CODEX_HOME, 'sessions');
+const ARCHIVED_SESSIONS_DIR = path.join(CODEX_HOME, 'archived_sessions');
 const PORT = Number(process.env.CODEX_TOKEN_MONITOR_PORT || process.env.PORT || 4127);
 const HOST = process.env.CODEX_TOKEN_MONITOR_HOST || '127.0.0.1';
 const CACHE_TTL_MS = Number(process.env.CODEX_TOKEN_MONITOR_CACHE_MS || 8000);
 const MAX_REQUEST_DURATION_ESTIMATE_MS = 10 * 60 * 1000;
-const SESSION_PARSER_VERSION = 2;
+const SESSION_PARSER_VERSION = 3;
 
 const cache = new Map();
 
@@ -230,6 +233,7 @@ function estimateCost(usage, model, serviceTier) {
   const outputTokens = Math.max(0, finiteOrZero(usage?.output_tokens));
   const threshold = Number(pricingConfig.long_context_threshold_tokens || 272000);
   const selectedServiceTier = pricingServiceTier(serviceTier);
+  const assumedServiceTier = !normalizeServiceTier(serviceTier) || normalizeServiceTier(serviceTier) === 'auto';
   const overLongContextThreshold = inputTokens > threshold;
   let rates = resolved.pricing;
   let rateTier = 'standard';
@@ -274,9 +278,12 @@ function estimateCost(usage, model, serviceTier) {
     currency: pricingConfig.currency || 'USD',
     amount_usd: amountUsd,
     known: true,
-    complete: !cacheWriteMissing,
-    is_lower_bound: cacheWriteMissing,
-    estimate_kind: cacheWriteMissing ? 'lower_bound' : 'token_rate_estimate',
+    complete: !cacheWriteMissing && !assumedServiceTier,
+    service_tier_assumed: assumedServiceTier,
+    assumption: assumedServiceTier ? 'standard_rate_used_without_service_tier_evidence' : null,
+    cache_write_tokens_missing: cacheWriteMissing,
+    is_lower_bound: cacheWriteMissing && !assumedServiceTier,
+    estimate_kind: assumedServiceTier ? 'assumed_standard_rate' : cacheWriteMissing ? 'lower_bound' : 'token_rate_estimate',
     reason: cacheWriteMissing ? 'cache_write_tokens_unavailable_in_codex_session' : null,
     model_key: resolved.key,
     tier: rateTier,
@@ -337,6 +344,7 @@ function createBucketAccumulator(ts, width) {
     amount_usd: 0,
     priced_records: 0,
     lower_bound_records: 0,
+    assumed_service_tier_records: 0,
     duration_sum: 0,
     duration_records: 0,
     first_output_sum: 0,
@@ -367,6 +375,7 @@ function summarizeBuckets(requests, width, startMs, endMs) {
       item.amount_usd += req.cost_estimate.amount_usd;
       item.priced_records++;
       if (req.cost_estimate.is_lower_bound) item.lower_bound_records++;
+      if (req.cost_estimate.service_tier_assumed) item.assumed_service_tier_records++;
     }
     if (Number.isFinite(req.duration_ms_estimate) && req.duration_ms_estimate > 0) {
       item.duration_sum += req.duration_ms_estimate;
@@ -411,6 +420,7 @@ function summarizeBuckets(requests, width, startMs, endMs) {
         amount_usd: item.amount_usd,
         priced_records: item.priced_records,
         lower_bound_records: item.lower_bound_records,
+        assumed_service_tier_records: item.assumed_service_tier_records,
         is_lower_bound: item.lower_bound_records > 0
       },
       average_request_duration_ms_estimate: item.duration_records
@@ -485,6 +495,7 @@ function initDb() {
   const database = new DatabaseSync(DB_FILE);
   database.exec(`
     PRAGMA busy_timeout = 3000;
+    PRAGMA journal_mode = WAL;
 
     CREATE TABLE IF NOT EXISTS session_files (
       file_path TEXT PRIMARY KEY,
@@ -575,8 +586,30 @@ function ensureColumn(database, table, column, definition) {
   }
 }
 
+function* sessionLines(file) {
+  const fd = fs.openSync(file, 'r');
+  const decoder = new StringDecoder('utf8');
+  const buffer = Buffer.alloc(64 * 1024);
+  let pending = '';
+  try {
+    let size;
+    while ((size = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) {
+      pending += decoder.write(buffer.subarray(0, size));
+      let start = 0, end;
+      while ((end = pending.indexOf('\n', start)) !== -1) {
+        yield pending.slice(start, end).replace(/\r$/, '');
+        start = end + 1;
+      }
+      pending = pending.slice(start);
+    }
+    pending += decoder.end();
+    if (pending) yield pending.replace(/\r$/, '');
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function parseSessionFile(file, stat) {
-  const text = fs.readFileSync(file, 'utf8');
   const session = {
     id: parseSessionIdFromPath(file),
     file,
@@ -616,7 +649,7 @@ function parseSessionFile(file, stat) {
     }
   };
 
-  for (const line of text.split(/\r?\n/)) {
+  for (const line of sessionLines(file)) {
     if (!line) continue;
     diagnostics.scanned_lines++;
     const row = parseJsonLine(line);
@@ -912,132 +945,79 @@ function fileNeedsIngest(known, stat) {
 
 function ingestChangedSessionFiles() {
   const startedAt = Date.now();
-  const files = walkFiles(SESSIONS_DIR, (file) => file.endsWith('.jsonl'));
-  const knownStmt = db.prepare('SELECT file_size, mtime_ms, parser_version FROM session_files WHERE file_path = ?');
-  const changed = [];
+  const activeFiles = walkFiles(SESSIONS_DIR, (file) => file.endsWith('.jsonl'));
+  const archivedFiles = walkFiles(ARCHIVED_SESSIONS_DIR, (file) => file.endsWith('.jsonl'));
+  const files = [...activeFiles, ...archivedFiles];
+  const knownStmt = db.prepare('SELECT * FROM session_files WHERE file_path = ?');
+  const groups = new Map();
   let statErrors = 0;
-
   for (const file of files) {
     try {
       const stat = fs.statSync(file);
       const known = knownStmt.get(file);
-      if (fileNeedsIngest(known, stat)) changed.push({ file, stat, known });
-    } catch {
-      statErrors++;
-    }
+      const id = known?.session_id || path.basename(file).match(/([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\.jsonl$/i)?.[1] || file;
+      const group = groups.get(id) || { changed: false, files: [] };
+      group.changed ||= fileNeedsIngest(known, stat) || Boolean(known?.last_error);
+      group.files.push({ file, stat });
+      groups.set(id, group);
+    } catch { statErrors++; }
   }
-
-  const parsed = [];
-  let parseErrors = 0;
-  for (const item of changed) {
+  const insertRecord = db.prepare(
+    'INSERT OR IGNORE INTO token_records (' + TOKEN_RECORD_COLUMNS.join(', ') + ') VALUES (' + TOKEN_RECORD_COLUMNS.map(() => '?').join(', ') + ')'
+  );
+  const deleteSession = db.prepare('DELETE FROM token_records WHERE session_id = ?');
+  const deleteMetadata = db.prepare('DELETE FROM session_files WHERE session_id = ?');
+  const insertMetadata = db.prepare(
+    'INSERT OR REPLACE INTO session_files (file_path,file_size,mtime_ms,scanned_at_ms,session_id,last_error,scanned_lines,malformed_lines,token_events,parsed_records,parser_version) VALUES (?,?,?,?,?,?,?,?,?,?,?)'
+  );
+  let scannedFiles = 0, insertedRecords = 0, deletedRecords = 0, parseErrors = 0;
+  for (const group of groups.values()) {
+    if (!group.changed) continue;
+    // Rebuild one logical session atomically, including both active/archive copies.
+    // Only sessions with readable originals are replaced; orphan history is retained.
+    let inTransaction = false, sessionId = null, inserted = 0, deleted = 0;
     try {
-      parsed.push({ ...item, parsed: parseSessionFile(item.file, item.stat), error: null });
-    } catch (error) {
-      parseErrors++;
-      parsed.push({ ...item, parsed: null, error });
-    }
-  }
-
-  let insertedRecords = 0;
-  let deletedRecords = 0;
-  if (parsed.length) {
-    const insertRecordSql = `
-      INSERT OR IGNORE INTO token_records (${TOKEN_RECORD_COLUMNS.join(', ')})
-      VALUES (${TOKEN_RECORD_COLUMNS.map(() => '?').join(', ')})
-    `;
-    const insertRecordStmt = db.prepare(insertRecordSql);
-    const deleteFileRecordsStmt = db.prepare('DELETE FROM token_records WHERE session_file = ?');
-    const upsertFileStmt = db.prepare(`
-      INSERT INTO session_files (
-        file_path,
-        file_size,
-        mtime_ms,
-        scanned_at_ms,
-        session_id,
-        last_error,
-        scanned_lines,
-        malformed_lines,
-        token_events,
-        parsed_records,
-        parser_version
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(file_path) DO UPDATE SET
-        file_size = excluded.file_size,
-        mtime_ms = excluded.mtime_ms,
-        scanned_at_ms = excluded.scanned_at_ms,
-        session_id = excluded.session_id,
-        last_error = excluded.last_error,
-        scanned_lines = excluded.scanned_lines,
-        malformed_lines = excluded.malformed_lines,
-        token_events = excluded.token_events,
-        parsed_records = excluded.parsed_records,
-        parser_version = excluded.parser_version
-    `);
-
-    let inTransaction = false;
-    try {
-      db.exec('BEGIN IMMEDIATE');
-      inTransaction = true;
-      for (const item of parsed) {
-        if (
-          item.known &&
-          (Number(item.stat.size) < Number(item.known.file_size) ||
-            Number(item.known.parser_version || 1) !== SESSION_PARSER_VERSION)
-        ) {
-          const result = deleteFileRecordsStmt.run(item.file);
-          deletedRecords += Number(result?.changes || 0);
+      for (const item of group.files) {
+        scannedFiles++;
+        const parsed = parseSessionFile(item.file, item.stat);
+        if (parsed.diagnostics.malformed_lines) throw new Error('Incomplete or malformed session JSONL');
+        if (!sessionId) {
+          sessionId = parsed.session.id;
+          db.exec('BEGIN IMMEDIATE');
+          inTransaction = true;
+          deleted = Number(deleteSession.run(sessionId).changes);
+          deleteMetadata.run(sessionId);
+        } else if (sessionId !== parsed.session.id) {
+          throw new Error('Session identity mismatch');
         }
-        if (item.error) {
-          upsertFileStmt.run(
-            item.file,
-            item.stat.size,
-            item.stat.mtimeMs,
-            startedAt,
-            null,
-            item.error?.message || String(item.error),
-            0,
-            0,
-            0,
-            0,
-            SESSION_PARSER_VERSION
-          );
-          continue;
+        for (const record of parsed.records) {
+          inserted += Number(insertRecord.run(...TOKEN_RECORD_COLUMNS.map((column) => sqliteValue(record[column]))).changes);
         }
-        for (const record of item.parsed.records) {
-          const result = insertRecordStmt.run(...TOKEN_RECORD_COLUMNS.map((column) => sqliteValue(record[column])));
-          insertedRecords += Number(result?.changes || 0);
-        }
-        upsertFileStmt.run(
-          item.file,
-          item.stat.size,
-          item.stat.mtimeMs,
-          startedAt,
-          item.parsed.session.id,
-          null,
-          item.parsed.diagnostics.scanned_lines,
-          item.parsed.diagnostics.malformed_lines,
-          item.parsed.diagnostics.token_events,
-          item.parsed.diagnostics.parsed_records,
-          SESSION_PARSER_VERSION
-        );
+        insertMetadata.run(item.file, item.stat.size, item.stat.mtimeMs, startedAt, sessionId, null,
+          parsed.diagnostics.scanned_lines, parsed.diagnostics.malformed_lines,
+          parsed.diagnostics.token_events, parsed.diagnostics.parsed_records, SESSION_PARSER_VERSION);
       }
       db.exec('COMMIT');
       inTransaction = false;
-    } catch (error) {
+      insertedRecords += inserted;
+      deletedRecords += deleted;
+    } catch {
       if (inTransaction) db.exec('ROLLBACK');
-      throw error;
+      parseErrors++;
+      // Do not advance the file fingerprint on failure: retry on the next refresh.
     }
   }
-
   if (insertedRecords || deletedRecords) cache.clear();
   return {
     ...indexedDiagnostics(files.length),
-    session_scanned_files: changed.length,
+    archived_sessions_dir: ARCHIVED_SESSIONS_DIR,
+    active_session_files: activeFiles.length,
+    archived_session_files: archivedFiles.length,
+    session_scanned_files: scannedFiles,
     local_db_ingest_mode: 'on_demand_changed_session_files',
     local_db_last_ingest_ms: startedAt,
-    local_db_changed_files: changed.length,
-    local_db_unchanged_files: Math.max(0, files.length - changed.length - statErrors),
+    local_db_changed_files: scannedFiles,
+    local_db_unchanged_files: Math.max(0, files.length - scannedFiles - statErrors),
     local_db_inserted_records: insertedRecords,
     local_db_deleted_records: deletedRecords,
     local_db_parse_errors: parseErrors,
@@ -1187,6 +1167,7 @@ function summarizeCost(requests) {
   let pricedRecords = 0;
   let unpricedRecords = 0;
   let lowerBoundRecords = 0;
+  let assumedTierRecords = 0;
   const byModel = new Map();
   for (const request of requests) {
     const cost = request.cost_estimate;
@@ -1197,6 +1178,7 @@ function summarizeCost(requests) {
       amountUsd += cost.amount_usd;
       pricedRecords++;
       if (cost.is_lower_bound) lowerBoundRecords++;
+      if (cost.service_tier_assumed) assumedTierRecords++;
       const key = cost.model_key || request.model || 'unknown';
       const item = byModel.get(key) || { model: key, records: 0, lower_bound_records: 0, amount_usd: 0 };
       item.records++;
@@ -1213,6 +1195,7 @@ function summarizeCost(requests) {
     priced_records: pricedRecords,
     unpriced_records: unpricedRecords,
     lower_bound_records: lowerBoundRecords,
+    assumed_service_tier_records: assumedTierRecords,
     is_lower_bound: lowerBoundRecords > 0,
     source: pricingConfig.source || '',
     updated_at: pricingConfig.updated_at || '',
@@ -1236,8 +1219,43 @@ function countBy(items, getKey) {
     .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key));
 }
 
+let ingestWorker = null;
+let lastIngest = null;
+let lastIngestCompletedAt = 0;
+let lastIngestError = null;
+
+function scheduleIngest() {
+  if (ingestWorker || Date.now() - lastIngestCompletedAt < CACHE_TTL_MS) return;
+  const worker = spawn(process.execPath, ['--no-warnings', '--max-old-space-size=768', __filename, '--ingest-only'], {
+    windowsHide: true, stdio: ['ignore', 'pipe', 'pipe']
+  });
+  ingestWorker = worker;
+  cache.clear();
+  let output = '';
+  worker.stdout.on('data', chunk => { output = (output + chunk).slice(-65536); });
+  worker.stderr.resume();
+  worker.on('error', () => { lastIngestError = 'ingest_worker_start_failed'; });
+  worker.on('close', code => {
+    try {
+      if (code !== 0) throw new Error('worker_failed');
+      lastIngest = JSON.parse(output);
+      lastIngestError = lastIngest.local_db_parse_errors ? 'session_parse_failed_will_retry' : null;
+    } catch { lastIngestError = 'ingest_failed_will_retry'; }
+    ingestWorker = null;
+    lastIngestCompletedAt = Date.now();
+    cache.clear();
+  });
+}
+
+process.on('exit', () => { if (ingestWorker) ingestWorker.kill(); });
+
 function buildData(startMs, endMs, bucket, pagination) {
-  const diagnostics = ingestChangedSessionFiles();
+  const diagnostics = {
+    ...(lastIngest || indexedDiagnostics(0)),
+    indexing_in_progress: Boolean(ingestWorker),
+    last_index_completed_at: lastIngestCompletedAt || null,
+    indexing_error: lastIngestError
+  };
   const requests = queryTokenRecords(startMs, endMs);
   const excludedSystemRecords = countExcludedSystemRecords(startMs, endMs);
 
@@ -1414,6 +1432,7 @@ const server = http.createServer((req, res) => {
   }
   const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
   if (url.pathname === '/api/data') {
+    scheduleIngest();
     const range = parseRange(url.searchParams);
     const cacheKey = `${range.startMs}:${range.endMs}:${range.bucket}:${range.page}:${range.pageSize}`;
     const cached = cache.get(cacheKey);
@@ -1439,6 +1458,12 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/api/health') {
     sendJson(res, 200, {
       ok: true,
+      version: require('./package.json').version,
+      parser_version: SESSION_PARSER_VERSION,
+      pricing_updated_at: pricingConfig.updated_at,
+      session_sources: [SESSIONS_DIR, ARCHIVED_SESSIONS_DIR],
+      indexing_in_progress: Boolean(ingestWorker),
+      indexing_error: lastIngestError,
       pid: process.pid,
       codex_home: CODEX_HOME,
       sessions_dir_exists: fs.existsSync(SESSIONS_DIR),
@@ -1451,15 +1476,23 @@ const server = http.createServer((req, res) => {
   sendStatic(res, url.pathname);
 });
 
-if (require.main === module) {
+if (require.main === module && process.argv.includes('--ingest-only')) {
+  try {
+    console.log(JSON.stringify(ingestChangedSessionFiles()));
+  } finally { db.close(); }
+} else if (require.main === module) {
   server.listen(PORT, HOST, () => {
     console.log(`Codex token monitor: http://${HOST}:${PORT}`);
     console.log(`CODEX_HOME: ${CODEX_HOME}`);
+    scheduleIngest();
   });
 }
 
 module.exports = {
   estimateCost,
+  ingestChangedSessionFiles,
+  summarizeCost,
+  db,
   extractServiceTier,
   parseSessionFile,
   pricingServiceTier

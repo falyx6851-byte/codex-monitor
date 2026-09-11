@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 const MAX_REQUEST_DURATION_ESTIMATE_MS = 10 * 60 * 1000;
 
 function usageText() {
@@ -230,7 +230,8 @@ function redactLocalPath(value) {
 
 function scanSessions(options) {
   const sessionsDir = path.join(options.codexHome, 'sessions');
-  const files = walkFiles(sessionsDir, (file) => file.endsWith('.jsonl'));
+  const archivedSessionsDir = path.join(options.codexHome, 'archived_sessions');
+  const files = [sessionsDir, archivedSessionsDir].flatMap(dir => walkFiles(dir, file => file.endsWith('.jsonl')));
   const records = [];
   const seen = new Set();
   const sessions = new Map();
@@ -490,6 +491,7 @@ function scanSessions(options) {
     diagnostics: {
       codex_home: options.codexHome,
       sessions_dir: sessionsDir,
+      archived_sessions_dir: archivedSessionsDir,
       session_files: files.length,
       scanned_files: scannedFiles,
       scanned_lines: scannedLines,
@@ -599,6 +601,7 @@ function summarize(scan, options) {
 function redactReportPaths(report) {
   report.diagnostics.codex_home = '[redacted-path]';
   report.diagnostics.sessions_dir = '[redacted-path]';
+  report.diagnostics.archived_sessions_dir = '[redacted-path]';
   for (const session of report.summary.workspaces || []) {
     session.key = redactLocalPath(session.key);
   }

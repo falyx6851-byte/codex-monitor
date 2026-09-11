@@ -1,17 +1,25 @@
 param(
-    [int]$Port = 4127
+    [int]$Port = 4127,
+    [string]$TaskName = "CodexTokenMonitor"
 )
 
 $root = Split-Path -Parent $PSScriptRoot
 $pidPath = Join-Path $root "data\server.pid"
 $stopped = $false
 
+# Stop supervision first so it does not immediately restart Node.
+$task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+if ($task -and $task.State -eq 'Running') {
+    Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    $stopped = $true
+}
+
 if (Test-Path -LiteralPath $pidPath) {
     $oldPid = Get-Content -LiteralPath $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($oldPid) {
-        $proc = Get-Process -Id ([int]$oldPid) -ErrorAction SilentlyContinue
-        if ($proc) {
-            Stop-Process -Id $proc.Id -Force
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$oldPid)" -ErrorAction SilentlyContinue
+        if ($proc -and $proc.CommandLine -and $proc.CommandLine.Contains($root)) {
+            Stop-Process -Id $proc.ProcessId -Force
             $stopped = $true
         }
     }

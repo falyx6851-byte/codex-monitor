@@ -191,7 +191,9 @@ function renderMetrics(data) {
   const cost = data.summary.estimated_cost || {};
   const success = countValue(data.counts.status, 'success');
   const failed = countValue(data.counts.status, 'failed');
-  const costSub = cost.lower_bound_records
+  const costSub = cost.assumed_service_tier_records
+    ? `${fmtNum(cost.assumed_service_tier_records)} 条档位未知，按标准价估算`
+    : cost.lower_bound_records
     ? `${fmtNum(cost.lower_bound_records)} 条缺缓存写入量`
     : `${fmtNum(cost.priced_records)} 条已计价`;
   els.metrics.innerHTML = [
@@ -240,7 +242,8 @@ function sourceLabel(context = {}) {
 function costTitle(cost) {
   if (!cost?.known) return cost?.reason || '模型费率未知';
   const parts = [`${cost.model_key} / ${cost.tier}`];
-  if (cost.is_lower_bound) parts.push('缺少缓存写入 Token，金额未包含未知写入附加费');
+  if (cost.service_tier_assumed) parts.push('服务档位未知，暂按标准价估算，实际费用可能不同');
+  if (cost.cache_write_tokens_missing || cost.is_lower_bound) parts.push('缺少缓存写入 Token，金额未包含未知写入附加费');
   return parts.join('；');
 }
 
@@ -562,7 +565,12 @@ function render() {
   setView(state.view, false);
   const excluded = state.data.diagnostics?.excluded_system_token_count_records || 0;
   const excludedText = excluded ? ` · 已排除 ${fmtNum(excluded)} 条系统维护事件` : '';
-  els.status.textContent = `更新于 ${fmtFullDate(state.data.generated_at)}${excludedText}`;
+  const indexing = state.data.diagnostics?.indexing_in_progress;
+  const indexError = state.data.diagnostics?.indexing_error;
+  const completed = state.data.diagnostics?.last_index_completed_at;
+  els.status.textContent = indexError
+    ? '日志更新失败，显示已入库数据，下次刷新重试'
+    : `${indexing ? '日志更新中，显示已入库数据 · ' : ''}${completed ? `索引更新于 ${fmtFullDate(completed)}` : '显示已入库数据'}${excludedText}`;
 }
 
 function resetPageAndLoad() {

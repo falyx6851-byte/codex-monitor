@@ -70,6 +70,8 @@ data/codex-token-monitor.sqlite
 
 ## Windows 常驻运行
 
+安装计划任务后，Windows 持续托管 `scripts/run-supervised.ps1`：Node 退出后约 5 秒重新启动；托管脚本异常退出时，计划任务间隔 1 分钟重试（最多 999 次）。任务没有运行时长上限，登录后自动启动。此机制处理进程退出，不会主动终止占用端口的进程，也不检测服务卡死。`scripts/stop.ps1` 会先停止托管任务，避免手动停止后立即重启。
+
 前台启动：
 
 ```powershell
@@ -149,10 +151,15 @@ Windows 包装命令：
 
 ## 数据源口径
 
+从 v0.4.0 起，同时扫描当前 `CODEX_HOME` 下的 `sessions/` 与 `archived_sessions/`。按逻辑会话合并两处文件并去重，归档、恢复归档及重复刷新不会重复计数；仍缺少原始文件的历史入库记录予以保留。文件解析失败时保留原数据，下次刷新重试。大型日志逐行读取，首次升级会重新索引现有文件。 日志索引在后台进程执行，页面先显示已入库数据并提示更新状态；SQLite 使用 WAL，避免后台写入阻塞查询。
+
+统计仅覆盖本机这些日志可见的模型调用，不能保证包含其他设备、其他 CODEX_HOME 或日志未记录的调用。
+
 主数据源：
 
 ```text
 ~/.codex/sessions/YYYY/MM/DD/*.jsonl
+~/.codex/archived_sessions/*.jsonl
 ```
 
 主请求记录来自：
@@ -206,6 +213,8 @@ row.payload.info.last_token_usage
 如果 session JSONL 没有写 HTTP status 或错误码，本项目不会推断 `429`、`500` 或网络错误。
 
 ## 费用口径
+
+服务档位缺失或为 `auto` 的请求仍按标准价提供参考估算，但标记为“档位未知，按标准价估算”；汇总显示这类记录数，明细提示实际费用可能不同。这类金额不视为完整计价，也不保证是费用下限。
 
 费用来自 `pricing.json` 的本地估算。GPT-6 Astra / GPT-5.6 的完整公式是：
 
@@ -274,7 +283,7 @@ data/codex-token-monitor.sqlite
 同步模式：
 
 1. 页面或 API 请求 `/api/data`。
-2. 服务扫描 `sessions/**/*.jsonl`。
+2. 服务扫描 `sessions/**/*.jsonl` 和 `archived_sessions/**/*.jsonl`。
 3. 比较文件 `size`、`mtime` 与解析器版本。
 4. 只解析新增或变化文件。
 5. 写入本项目 SQLite。

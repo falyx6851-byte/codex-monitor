@@ -72,6 +72,8 @@ data/codex-token-monitor.sqlite
 
 ## Windows Helpers
 
+The startup task keeps `scripts/run-supervised.ps1` running under Windows Task Scheduler. Node is restarted about 5 seconds after exit; supervisor failures retry after 1 minute (up to 999 times). The task has no execution time limit and starts at logon. This handles process exits, not hung servers, and never kills another port listener. `scripts/stop.ps1` stops supervision before stopping Node.
+
 Foreground:
 
 ```powershell
@@ -151,10 +153,15 @@ Main options:
 
 ## Data Sources
 
+Since v0.4.0, both `sessions/` and `archived_sessions/` under the current `CODEX_HOME` are scanned. Copies are merged by logical session and deduplicated across archive moves and repeated refreshes. Indexed history without original files is retained. Failed parsing preserves existing data and retries on refresh. Large logs are read incrementally; the first upgrade reindexes available originals. Indexing runs in a background process; the page serves indexed data and displays refresh status. SQLite WAL keeps reads available during ingestion.
+
+Coverage is limited to model calls visible in these local logs, not other devices, other CODEX_HOME directories, or unlogged calls.
+
 Primary source:
 
 ```text
 ~/.codex/sessions/YYYY/MM/DD/*.jsonl
+~/.codex/archived_sessions/*.jsonl
 ```
 
 The main request records come from:
@@ -208,6 +215,8 @@ Events where `last_token_usage.total_tokens > 0` but input/cache/output are all 
 If no explicit HTTP status or error code is present in the session JSONL, the project does not invent one. In particular, it does not infer `429`, `500`, or network failure unless Codex wrote that information into the session.
 
 ## Cost Semantics
+
+Requests with missing or `auto` service tiers retain a Standard-rate reference estimate, explicitly marked as assumed. The summary counts these records and detail tooltips disclose uncertainty. These estimates are neither complete nor guaranteed lower bounds.
 
 Costs are estimates from `pricing.json`. The complete GPT-6 Astra / GPT-5.6 formula is:
 
@@ -276,7 +285,7 @@ data/codex-token-monitor.sqlite
 Ingestion is on-demand:
 
 1. `/api/data` is requested.
-2. The server scans `sessions/**/*.jsonl`.
+2. The server scans `sessions/**/*.jsonl` and `archived_sessions/**/*.jsonl`.
 3. It compares file `size`, `mtime`, and parser version.
 4. Only changed files are parsed.
 5. Normalized records are inserted into local SQLite.
