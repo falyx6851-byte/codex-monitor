@@ -6,7 +6,7 @@
     <meta name="color-scheme" content="light">
     <title>Codex Monitor</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="/styles.css?v=9">
+    <link rel="stylesheet" href="/styles.css?v=10">
   </head>
   <body>
     <header class="masthead">
@@ -32,7 +32,7 @@
       </div>
 
       <div class="top-actions">
-        <button id="exportBtn" class="button quiet" type="button"><span aria-hidden="true">↥</span> 导出 JSON</button>
+        <button id="exportBtn" class="button quiet" type="button"><span aria-hidden="true">↥</span> 导出全部 JSON</button>
         <button id="refreshBtn" class="button primary" type="button"><span aria-hidden="true">↻</span> 刷新数据</button>
       </div>
     </header>
@@ -42,6 +42,7 @@
         <span class="control-caption">统计周期</span>
         <div class="segmented" role="group" aria-label="快捷统计周期">
           <button class="chip active" data-days="1" type="button">今日</button>
+          <button class="chip" data-days="yesterday" type="button">昨天</button>
           <button class="chip" data-days="7" type="button">7 天</button>
           <button class="chip" data-days="30" type="button">30 天</button>
           <button class="chip" data-days="custom" type="button">自定义</button>
@@ -216,6 +217,7 @@
       <div id="detailContent" class="detail-content"></div>
     </dialog>
 
-    <script src="/app.js?v=9"></script>
+    <script src="/query-state.js?v=10"></script>
+    <script src="/app.js?v=10"></script>
   </body>
 </html>

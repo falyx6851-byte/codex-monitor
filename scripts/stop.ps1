@@ -6,6 +6,8 @@ param(
 $root = Split-Path -Parent $PSScriptRoot
 $pidPath = Join-Path $root "data\server.pid"
 $stopped = $false
+$serverPath = Join-Path $root 'server.js'
+. (Join-Path $PSScriptRoot 'process-identity.ps1')
 
 # Stop supervision first so it does not immediately restart Node.
 $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -18,7 +20,7 @@ if (Test-Path -LiteralPath $pidPath) {
     $oldPid = Get-Content -LiteralPath $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($oldPid) {
         $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $([int]$oldPid)" -ErrorAction SilentlyContinue
-        if ($proc -and $proc.CommandLine -and $proc.CommandLine.Contains($root)) {
+        if (Test-MonitorProcess $proc $serverPath) {
             Stop-Process -Id $proc.ProcessId -Force
             $stopped = $true
         }
@@ -26,9 +28,8 @@ if (Test-Path -LiteralPath $pidPath) {
     Remove-Item -LiteralPath $pidPath -Force -ErrorAction SilentlyContinue
 }
 
-$needle = (Join-Path $root "server.js").Replace("\", "\\")
 $matches = Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" |
-    Where-Object { $_.CommandLine -and $_.CommandLine.Replace("\", "\\").Contains($needle) }
+    Where-Object { Test-MonitorProcess $_ $serverPath }
 
 foreach ($item in $matches) {
     if ($item.ProcessId -ne $PID) {
@@ -39,9 +40,9 @@ foreach ($item in $matches) {
 
 $listeners = Get-NetTCPConnection -LocalAddress 127.0.0.1 -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
 foreach ($listener in $listeners) {
-    $proc = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
-    if ($proc -and $proc.ProcessName -eq "node") {
-        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $($listener.OwningProcess)" -ErrorAction SilentlyContinue
+    if (Test-MonitorProcess $proc $serverPath) {
+        Stop-Process -Id $proc.ProcessId -Force -ErrorAction SilentlyContinue
         $stopped = $true
     }
 }

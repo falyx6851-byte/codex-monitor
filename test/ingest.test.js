@@ -45,7 +45,7 @@ test('migrates old keys atomically and preserves history without original files'
  db.prepare(`INSERT INTO token_records (${columns.join(',')}) VALUES (${columns.map(()=>'?').join(',')})`).run(...columns.map(k=>orphan[k]));
  ingestChangedSessionFiles();assert.equal(count(),3);
  assert.equal(db.prepare("SELECT COUNT(*) n FROM token_records WHERE record_id='orphan'").get().n,1);
- assert.equal(db.prepare('SELECT parser_version FROM session_files WHERE session_id=?').get(id).parser_version,3);
+ assert.equal(db.prepare('SELECT parser_version FROM session_files WHERE session_id=?').get(id).parser_version,4);
 });
 test('malformed replacements preserve existing data and retry after repair',()=>{
  const file=path.join(archive,filename),before=db.prepare('SELECT file_size FROM session_files WHERE file_path=?').get(file).file_size;

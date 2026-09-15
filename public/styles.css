@@ -536,12 +536,12 @@ body.is-loading #refreshBtn { cursor: wait; opacity: .72; }
   .commandbar { gap: 10px; }
   .control-caption, .date-range label > span, .bucket-control > span, .page-size > span { display: none; }
   .metric { padding-right: 13px; padding-left: 13px; }
+  .metric-icon { display: none; }
   .metric .value { font-size: 24px; }
 }
 
 @media (min-width: 1251px) {
   .runtime-status { transform: translateX(-75px); }
-  .date-range { transform: translateX(-38px); }
 }
 
 @media (max-width: 900px) {

@@ -7,7 +7,9 @@ const state = {
   periodPage: 1,
   autoEnd: true,
   view: location.hash === '#analytics' ? 'analytics' : 'requests',
-  visibleRecords: []
+  visibleRecords: [],
+  requestSequence: 0,
+  requestController: null
 };
 
 const els = {
@@ -116,20 +118,11 @@ function clampText(value, max = 80) {
 }
 
 function setDefaultRange(days = 1) {
-  const end = Date.now();
-  let start;
-  if (days === 1) {
-    const d = new Date();
-    d.setHours(0, 0, 0, 0);
-    start = d.getTime();
-  } else if (days <= 0) {
-    start = 0;
-  } else {
-    start = end - days * 24 * 60 * 60 * 1000;
-  }
+  const {start,end} = MonitorQuery.presetRange(days);
   els.start.value = start ? toLocalInput(start) : '';
   els.end.value = toLocalInput(end);
-  state.autoEnd = true;
+  state.autoEnd = days !== 'yesterday';
+  return {start,end};
 }
 
 function selectedBucket(start, end) {
@@ -140,34 +133,68 @@ function selectedBucket(start, end) {
   return 'week';
 }
 
-function queryUrl() {
-  if (state.autoEnd) els.end.value = toLocalInput(Date.now());
+function queryUrl(refresh = false) {
+  const preset = state.activeDays != null ? setDefaultRange(state.activeDays) : null;
+  if (!preset && state.autoEnd) els.end.value = toLocalInput(Date.now());
   const params = new URLSearchParams();
-  const start = fromLocalInput(els.start.value);
-  const end = state.autoEnd ? Date.now() : fromLocalInput(els.end.value) || Date.now();
+  const start = preset ? preset.start : fromLocalInput(els.start.value);
+  const end = preset ? preset.end : state.autoEnd ? Date.now() : fromLocalInput(els.end.value) || Date.now();
   if (start) params.set('start_ms', String(start));
   else params.set('days', '0');
   params.set('end_ms', String(end));
   params.set('bucket', selectedBucket(start, end));
   params.set('page', String(state.page));
   params.set('page_size', els.pageSize.value || '6');
+  params.set('refresh', refresh ? '1' : '0');
   return `/api/data?${params.toString()}`;
 }
 
-async function loadData() {
+async function loadData({refresh = false} = {}) {
+  const sequence = ++state.requestSequence;
+  state.requestController?.abort();
+  const controller = new AbortController(); state.requestController=controller;
+  const {signal}=controller;
+  const pause = ms => new Promise((resolve,reject)=>{
+    if (signal.aborted) { reject(new DOMException('Aborted','AbortError'));return; }
+    const onAbort=()=>{clearTimeout(timer);signal.removeEventListener('abort',onAbort);reject(new DOMException('Aborted','AbortError'));};
+    const timer=setTimeout(()=>{signal.removeEventListener('abort',onAbort);resolve();},ms);
+    signal.addEventListener('abort',onAbort,{once:true});
+  });
+  const read = async url => {
+    const res=await fetch(url,{cache:'no-store',signal});
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  };
   document.body.classList.add('is-loading');
   els.refresh.disabled = true;
+  els.export.disabled = true;
   els.status.textContent = '正在同步本地 session 数据';
   els.errorBanner.hidden = true;
   try {
-    const res = await fetch(queryUrl(), { cache: 'no-store' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    state.data = await res.json();
+    let data=await read(queryUrl(refresh));
+    if (sequence!==state.requestSequence) return;
+    state.data=data;render();
+    let delay=400;
+    while (data.diagnostics?.indexing_in_progress) {
+      await pause(delay);delay=Math.min(2000,delay*1.5);
+      const health=await read('/api/health');
+      if (sequence!==state.requestSequence) return;
+      if (health.indexing_in_progress) continue;
+      data=await read(queryUrl(false));
+      if (sequence!==state.requestSequence) return;
+      state.data=data;render();
+    }
+    if (sequence!==state.requestSequence) return;
     state.page = state.data.pagination?.page || state.page;
     render();
+  } catch (error) {
+    if (sequence!==state.requestSequence || error.name==='AbortError') return;
+    throw error;
   } finally {
-    document.body.classList.remove('is-loading');
-    els.refresh.disabled = false;
+    if (sequence===state.requestSequence) {
+      document.body.classList.remove('is-loading');
+      els.refresh.disabled=false;els.export.disabled=!state.data;
+    }
   }
 }
 
@@ -176,8 +203,8 @@ function metric(label, value, sub, accent, index, icon) {
     <span class="metric-icon" aria-hidden="true">${icon}</span>
     <div class="metric-copy">
       <div class="metric-head"><span class="label">${escapeHtml(label)}</span><span class="index">0${index}</span></div>
-      <div class="value">${escapeHtml(value)}</div>
-      <div class="sub">${escapeHtml(sub || '')}</div>
+      <div class="value" title="${escapeHtml(value)}">${escapeHtml(value)}</div>
+      <div class="sub" title="${escapeHtml(sub || '')}">${escapeHtml(sub || '')}</div>
     </div>
   </article>`;
 }
@@ -191,11 +218,9 @@ function renderMetrics(data) {
   const cost = data.summary.estimated_cost || {};
   const success = countValue(data.counts.status, 'success');
   const failed = countValue(data.counts.status, 'failed');
-  const costSub = cost.assumed_service_tier_records
-    ? `${fmtNum(cost.assumed_service_tier_records)} 条档位未知，按标准价估算`
-    : cost.lower_bound_records
-    ? `${fmtNum(cost.lower_bound_records)} 条缺缓存写入量`
-    : `${fmtNum(cost.priced_records)} 条已计价`;
+  const costSub = [cost.unpriced_records ? `${fmtNum(cost.unpriced_records)} 条未计价` : `${fmtNum(cost.priced_records)} 条已计价`,
+    cost.assumed_service_tier_records ? `${fmtNum(cost.assumed_service_tier_records)} 条按标准价假设` : '',
+    cost.lower_bound_records ? `${fmtNum(cost.lower_bound_records)} 条缺缓存写入量` : ''].filter(Boolean).join(' · ');
   els.metrics.innerHTML = [
     metric('请求记录', fmtNum(data.summary.request_records), `成功 ${fmtNum(success)} · 失败 ${fmtNum(failed)}`, 'accent-green', 1, '∿'),
     metric('总 Token', fmtCompact(usage.total_tokens), '输入 + 输出合计', 'accent-blue', 2, '▤'),
@@ -208,12 +233,12 @@ function renderMetrics(data) {
 }
 
 function effectiveDurationMs(record) {
-  return record.duration_ms ?? record.duration_ms_estimate ?? record.turn_elapsed_ms_estimate;
+  return record.duration_ms ?? record.duration_ms_estimate;
 }
 
 function statusPill(record) {
   const failed = String(record.status || 'success').toLowerCase() === 'failed';
-  const title = failed ? record.error_reason || 'session 未记录明确错误原因' : '已记录请求级 token_count';
+  const title = failed ? record.error_reason || 'session 未记录明确错误原因' : '已记录模型用量';
   return `<span class="pill ${failed ? 'bad' : 'ok'}" title="${escapeHtml(title)}">${failed ? '失败' : '成功'}</span>`;
 }
 
@@ -466,8 +491,8 @@ function drawDonutChart(canvas, rows, colors) {
 
 function renderModelShare(rows) {
   const total = rows.reduce((sum, row) => sum + row.count, 0);
-  const visibleRows = rows.slice(0, 5);
-  const colors = ['#2078ff', '#08a060', '#20c0e8', '#fc9408', '#7153a6'];
+  const visibleRows = MonitorQuery.modelChartRows(rows);
+  const colors = ['#2078ff', '#08a060', '#20c0e8', '#fc9408', '#7153a6', '#8f9ba8'];
   els.modelShare.innerHTML = visibleRows.map((row, index) => {
     const share = total ? row.count / total : 0;
     return `<div class="model-row">
@@ -507,7 +532,7 @@ function renderAnalytics() {
     { values: buckets.map((b) => b.usage.output_tokens), color: '#20c0e8' }
   ]);
   drawLineChart(document.getElementById('costTrendChart'), labels, [
-    { values: buckets.map((b) => b.estimated_cost?.amount_usd || 0), color: '#fc9408', fill: true }
+    { values: buckets.map((b) => b.estimated_cost?.amount_usd ?? null), color: '#fc9408', fill: true }
   ], { axisFormatter: (value) => {
     const amount = Math.max(0, value);
     return `$${amount.toFixed(amount < 10 ? 1 : 0)}`;
@@ -597,22 +622,21 @@ document.querySelectorAll('.chip').forEach((button) => {
       els.start.focus();
       return;
     }
-    state.activeDays = Number(button.dataset.days);
+    state.activeDays = button.dataset.days === 'yesterday' ? 'yesterday' : Number(button.dataset.days);
     setDefaultRange(state.activeDays);
     resetPageAndLoad();
   });
 });
 
-els.refresh.addEventListener('click', () => loadData().catch(showError));
+els.refresh.addEventListener('click', () => loadData({refresh:true}).catch(showError));
 els.export.addEventListener('click', () => {
   if (!state.data) return;
-  const blob = new Blob([JSON.stringify(state.data, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
+  const range=state.data.range;
+  const params=new URLSearchParams({start_ms:String(range.start_ms),end_ms:String(range.end_ms),bucket:range.bucket});
   const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = `codex-session-token-records-${Date.now()}.json`;
+  anchor.href = `/api/export?${params}`;
+  anchor.download = `codex-all-records-${Date.now()}.json`;
   anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
 });
 els.start.addEventListener('change', () => { clearQuickRange(); resetPageAndLoad(); });
 els.end.addEventListener('change', () => { clearQuickRange(); state.autoEnd = false; resetPageAndLoad(); });
@@ -661,5 +685,5 @@ function showError(error) {
 
 setDefaultRange(1);
 setView(state.view, false);
-loadData().catch(showError);
-setInterval(() => loadData().catch(showError), 120_000);
+loadData({refresh:true}).catch(showError);
+setInterval(() => loadData({refresh:true}).catch(showError), 120_000);

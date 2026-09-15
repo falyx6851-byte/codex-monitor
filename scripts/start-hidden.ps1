@@ -1,59 +1,40 @@
 param(
     [int]$Port = 4127,
-    [string]$HostName = "127.0.0.1"
+    [string]$HostName = '127.0.0.1'
 )
-
+$ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$dataDir = Join-Path $root "data"
+$dataDir = Join-Path $root 'data'
 New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
-$pidPath = Join-Path $dataDir "server.pid"
-$logPath = Join-Path $dataDir "server.log"
-
-function Test-LocalPort {
-    param([int]$PortValue)
-    $client = New-Object System.Net.Sockets.TcpClient
-    try {
-        $iar = $client.BeginConnect("127.0.0.1", $PortValue, $null, $null)
-        if (-not $iar.AsyncWaitHandle.WaitOne(300)) { return $false }
-        $client.EndConnect($iar)
-        return $true
-    } catch {
-        return $false
-    } finally {
-        $client.Close()
+$pidPath = Join-Path $dataDir 'server.pid'
+$serverPath = Join-Path $root 'server.js'
+. (Join-Path $PSScriptRoot 'process-identity.ps1')
+$listener = Get-NetTCPConnection -LocalAddress $HostName -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+if ($listener) {
+    $existing = Get-CimInstance Win32_Process -Filter "ProcessId = $($listener[0].OwningProcess)"
+    if (Test-MonitorProcess $existing $serverPath) {
+        Write-Output "Already running at http://${HostName}:$Port pid=$($existing.ProcessId)"
+        exit 0
     }
+    throw "Port $Port is occupied by another application."
 }
-
-if (Test-Path -LiteralPath $pidPath) {
-    $oldPid = Get-Content -LiteralPath $pidPath -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($oldPid -and (Get-Process -Id ([int]$oldPid) -ErrorAction SilentlyContinue)) {
-        if (Test-LocalPort -PortValue $Port) {
-            Write-Output "Already running at http://127.0.0.1:$Port"
+$env:CODEX_TOKEN_MONITOR_PORT = [string]$Port
+$env:CODEX_TOKEN_MONITOR_HOST = $HostName
+$node = (Get-Command node.exe -ErrorAction Stop).Source
+$proc = Start-Process -FilePath $node -ArgumentList @('--no-warnings', ('"' + $serverPath + '"')) `
+    -WorkingDirectory $root -WindowStyle Hidden -PassThru `
+    -RedirectStandardOutput (Join-Path $dataDir 'server.log') -RedirectStandardError (Join-Path $dataDir 'server-error.log')
+Set-Content -LiteralPath $pidPath -Value ([string]$proc.Id) -Encoding ASCII
+for ($attempt = 0; $attempt -lt 30; $attempt++) {
+    if ($proc.HasExited) { throw "Monitor exited with code $($proc.ExitCode). See data/server-error.log." }
+    try {
+        $health = Invoke-RestMethod -Uri "http://${HostName}:$Port/api/health" -TimeoutSec 1
+        if ($health.ok -and $health.pid -eq $proc.Id) {
+            Write-Output "Started http://${HostName}:$Port pid=$($proc.Id)"
             exit 0
         }
-    }
+    } catch {}
+    Start-Sleep -Milliseconds 200
+    $proc.Refresh()
 }
-
-if (Test-LocalPort -PortValue $Port) {
-    Write-Output "Port $Port is already listening. Open http://127.0.0.1:$Port"
-    exit 0
-}
-
-$escapedRoot = $root.Replace("'", "''")
-$escapedLog = $logPath.Replace("'", "''")
-$cmd = @"
-`$env:CODEX_TOKEN_MONITOR_PORT='$Port'
-`$env:CODEX_TOKEN_MONITOR_HOST='$HostName'
-Set-Location -LiteralPath '$escapedRoot'
-node --no-warnings .\server.js *> '$escapedLog'
-"@
-
-$proc = Start-Process -FilePath "powershell.exe" `
-    -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $cmd) `
-    -WorkingDirectory $root `
-    -WindowStyle Hidden `
-    -PassThru
-
-Set-Content -LiteralPath $pidPath -Value ([string]$proc.Id) -Encoding ASCII
-Start-Sleep -Milliseconds 700
-Write-Output "Started http://127.0.0.1:$Port pid=$($proc.Id)"
+throw 'Monitor started but the health check did not complete; inspect data/server-error.log.'

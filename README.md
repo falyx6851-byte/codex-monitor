@@ -153,6 +153,18 @@ Main options:
 
 ## Data Sources
 
+### v0.5.0 query and accounting rules
+
+- The first session header identifies the file. Inherited subagent history is excluded; response IDs provide deduplication with legacy counter/event fallbacks.
+- Prefer `token_usage_record.payload.usage`, with `event_msg/token_count` fallback. The dashboard and CLI share one parser.
+- Model-output boundaries exclude subsequent tool waits; unavailable timing remains unknown.
+- Today, Yesterday, 7 days and 30 days are recomputed on each query. Ranges include start and exclude end; Yesterday is the previous local calendar day.
+- Filtering and pagination read the index. Manual/120-second refresh starts background indexing and automatically reloads the completed result.
+- Export All JSON streams every record in range from one consistent database snapshot. Unpriced costs remain unknown.
+- SQLite aggregates stored pricing columns and fetches only the requested detail page; bounded range caches follow database revisions. Restart and refresh after changing rates.
+
+
+
 Since v0.4.0, both `sessions/` and `archived_sessions/` under the current `CODEX_HOME` are scanned. Copies are merged by logical session and deduplicated across archive moves and repeated refreshes. Indexed history without original files is retained. Failed parsing preserves existing data and retries on refresh. Large logs are read incrementally; the first upgrade reindexes available originals. Indexing runs in a background process; the page serves indexed data and displays refresh status. SQLite WAL keeps reads available during ingestion.
 
 Coverage is limited to model calls visible in these local logs, not other devices, other CODEX_HOME directories, or unlogged calls.
@@ -164,7 +176,7 @@ Primary source:
 ~/.codex/archived_sessions/*.jsonl
 ```
 
-The main request records come from:
+Legacy fallback records come from (new-format precedence is described above):
 
 ```text
 row.type = "event_msg"
@@ -182,12 +194,12 @@ Relevant session fields:
 | Reasoning output tokens | `last_token_usage.reasoning_output_tokens` | Subset of output tokens; not added again to total |
 | Total tokens | `last_token_usage.total_tokens` | Main per-record total |
 | Model | Latest local `turn_context.model` | Local session context |
-| Timestamp | `token_count.timestamp` | Local session event timestamp |
+| Timestamp | response usage / last model output timestamp | Local session event timestamp |
 | Status | normal request-level `token_count`, explicit `event_msg/error` | Displayed as success / failed |
 | Error reason | `event_msg/error.payload.message` | Not fabricated when unavailable |
 | Cost estimate | `pricing.json` + token usage | Local estimate, not official billing |
 | First output estimate | local boundary to first `response_item` | Not official TTFT |
-| Response duration estimate | local boundary to `token_count` | Not server-side latency |
+| Response duration estimate | local boundary to completed model output | Not server-side latency |
 
 Excluded sources:
 
@@ -251,6 +263,9 @@ All requests, including historical requests, are revalued using the current pric
 USD per million tokens, short-context Standard rates. Fast is 2x the applicable Standard rates and Flex is 0.5x. Long context doubles input/cache rates and multiplies output rates by 1.5. Sources: [official pricing](https://developers.openai.com/api/docs/pricing), [GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra).
 
 ## API
+
+Full export: `GET /api/export`, using the same time parameters. `refresh=0` reads the index; `refresh=1` starts indexing. Health checks never trigger indexing.
+
 
 Health:
 

@@ -3,9 +3,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import parser from '../lib/session-parser.js';
 
-const VERSION = '0.4.0';
-const MAX_REQUEST_DURATION_ESTIMATE_MS = 10 * 60 * 1000;
+const VERSION = '0.5.0';
 
 function usageText() {
   return `
@@ -128,383 +128,37 @@ function parseTime(value) {
   return ms;
 }
 
-function parseJsonLine(line) {
-  try {
-    return JSON.parse(line);
-  } catch {
-    return null;
-  }
-}
-
-function walkFiles(dir, predicate, out = []) {
-  let entries = [];
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return out;
-  }
-  for (const entry of entries) {
-    const file = path.join(dir, entry.name);
-    if (entry.isDirectory()) walkFiles(file, predicate, out);
-    else if (entry.isFile() && predicate(file)) out.push(file);
-  }
-  return out;
-}
-
-function parseSessionIdFromPath(file) {
-  const name = path.basename(file, '.jsonl');
-  const m = name.match(/rollout-[^-]+-[^-]+-(.+)$/);
-  return m ? m[1] : name;
-}
-
-function finiteOrZero(value) {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function normalizeUsage(usage) {
-  const input = finiteOrZero(usage?.input_tokens);
-  const cached = finiteOrZero(usage?.cached_input_tokens ?? usage?.input_tokens_details?.cached_tokens);
-  const output = finiteOrZero(usage?.output_tokens);
-  const reasoning = finiteOrZero(usage?.reasoning_output_tokens ?? usage?.output_tokens_details?.reasoning_tokens);
-  const total = usage?.total_tokens == null ? input + output : finiteOrZero(usage.total_tokens);
-  return {
-    input_tokens: input,
-    cached_input_tokens: cached,
-    output_tokens: output,
-    reasoning_output_tokens: reasoning,
-    total_tokens: total
-  };
-}
-
-function addUsage(a, b) {
-  return {
-    input_tokens: a.input_tokens + b.input_tokens,
-    cached_input_tokens: a.cached_input_tokens + b.cached_input_tokens,
-    output_tokens: a.output_tokens + b.output_tokens,
-    reasoning_output_tokens: a.reasoning_output_tokens + b.reasoning_output_tokens,
-    total_tokens: a.total_tokens + b.total_tokens
-  };
-}
-
-function emptyUsage() {
-  return {
-    input_tokens: 0,
-    cached_input_tokens: 0,
-    output_tokens: 0,
-    reasoning_output_tokens: 0,
-    total_tokens: 0
-  };
-}
-
-function isSystemUsageWithoutBreakdown(usage) {
-  return (
-    usage.total_tokens > 0 &&
-    usage.input_tokens === 0 &&
-    usage.cached_input_tokens === 0 &&
-    usage.output_tokens === 0
-  );
-}
-
-function usageTuple(usage) {
-  return [
-    usage.input_tokens,
-    usage.cached_input_tokens,
-    usage.output_tokens,
-    usage.reasoning_output_tokens,
-    usage.total_tokens
-  ].join('/');
-}
-
-function dedupeKey(sessionId, usage, totalUsageSnapshot) {
-  const snapshot = totalUsageSnapshot || emptyUsage();
-  return `${sessionId}|last=${usageTuple(usage)}|total=${usageTuple(snapshot)}`;
-}
-
-function redactLocalPath(value) {
-  if (!value) return value;
-  const text = String(value);
-  if (!path.isAbsolute(text)) return text;
-  return '[redacted-path]';
-}
-
+const {parseSessionFile,walkFiles,normalizeUsage,addUsage,emptyUsage} = parser;
+function redactLocalPath(value) { return value ? '[redacted-path]' : value; }
 function scanSessions(options) {
-  const sessionsDir = path.join(options.codexHome, 'sessions');
-  const archivedSessionsDir = path.join(options.codexHome, 'archived_sessions');
-  const files = [sessionsDir, archivedSessionsDir].flatMap(dir => walkFiles(dir, file => file.endsWith('.jsonl')));
-  const records = [];
-  const seen = new Set();
-  const sessions = new Map();
-  let scannedFiles = 0;
-  let scannedLines = 0;
-  let malformedLines = 0;
-  let tokenEvents = 0;
-  let duplicateEvents = 0;
-  let excludedSystemEvents = 0;
-
+  const dirs=['sessions','archived_sessions'].map(dir=>path.join(options.codexHome,dir));
+  const files=dirs.flatMap(dir=>walkFiles(dir,f=>f.endsWith('.jsonl'))), records=[],seen=new Set(),sessions=new Map();
+  let scannedFiles=0,scannedLines=0,malformedLines=0,tokenEvents=0,duplicateEvents=0,excludedSystemEvents=0;
   for (const file of files) {
-    let stat;
-    try {
-      stat = fs.statSync(file);
-      if (stat.mtimeMs < options.start && stat.birthtimeMs < options.start) continue;
-    } catch {
-      continue;
+    let parsed;
+    try { parsed=parseSessionFile(file,fs.statSync(file)); } catch { continue; }
+    scannedFiles++;scannedLines+=parsed.diagnostics.scanned_lines;malformedLines+=parsed.diagnostics.malformed_lines;
+    tokenEvents+=parsed.diagnostics.token_events;excludedSystemEvents+=parsed.diagnostics.excluded_system_events;
+    // Match dashboard atomic ingestion: a corrupt source does not publish partial records.
+    if (parsed.diagnostics.malformed_lines) continue;
+    for (const row of parsed.records) {
+      if (row.ms<options.start || row.ms>=options.end) continue;
+      if (options.dedupe && seen.has(row.dedupe_key)) {duplicateEvents++;continue;}
+      seen.add(row.dedupe_key);
+      const usage=normalizeUsage(row);
+      const record={...row,usage,local_time:new Date(row.ms).toLocaleString(),
+        total_usage_snapshot:row.total_tokens_snapshot == null ? null : {
+          input_tokens:row.total_input_tokens_snapshot,cached_input_tokens:row.total_cached_input_tokens_snapshot,
+          cache_write_input_tokens:row.total_cache_write_input_tokens_snapshot,output_tokens:row.total_output_tokens_snapshot,
+          reasoning_output_tokens:row.total_reasoning_output_tokens_snapshot,total_tokens:row.total_tokens_snapshot},
+        stream_observed:row.stream_observed == null ? null : Boolean(row.stream_observed)};
+      records.push(record);sessions.set(row.session_id,parsed.session);
     }
-    scannedFiles++;
-    const session = {
-      id: parseSessionIdFromPath(file),
-      file,
-      cwd: '',
-      source: '',
-      thread_source: '',
-      originator: '',
-      model_provider: '',
-      cli_version: '',
-      model: '',
-      effort: '',
-      start_ms: stat.birthtimeMs || stat.mtimeMs,
-      end_ms: stat.mtimeMs,
-      token_events: 0,
-      records: 0
-    };
-
-    let text = '';
-    try {
-      text = fs.readFileSync(file, 'utf8');
-    } catch {
-      continue;
-    }
-
-    let currentModel = '';
-    let currentEffort = '';
-    let currentTurn = null;
-    let turnSequence = 0;
-    let pendingModelStartMs = null;
-    let pendingModelStartBasis = null;
-    let activeModelCall = null;
-    const recordsByTurn = new Map();
-    let ordinal = 0;
-    const setPendingModelStart = (value, basis) => {
-      if (Number.isFinite(value)) {
-        pendingModelStartMs = value;
-        pendingModelStartBasis = basis;
-      }
-    };
-
-    for (const line of text.split(/\r?\n/)) {
-      if (!line) continue;
-      scannedLines++;
-      const row = parseJsonLine(line);
-      if (!row) {
-        malformedLines++;
-        continue;
-      }
-      const ms = Date.parse(row.timestamp || '');
-      if (Number.isFinite(ms)) {
-        if (ms < session.start_ms) session.start_ms = ms;
-        if (ms > session.end_ms) session.end_ms = ms;
-      }
-      const payload = row.payload || {};
-      if (row.type === 'session_meta') {
-        Object.assign(session, {
-          id: payload.id || session.id,
-          cwd: payload.cwd || session.cwd,
-          source: typeof payload.source === 'string' ? payload.source : JSON.stringify(payload.source || ''),
-          thread_source: payload.thread_source || '',
-          originator: payload.originator || '',
-          model_provider: payload.model_provider || '',
-          cli_version: payload.cli_version || ''
-        });
-      } else if (row.type === 'turn_context') {
-        if (payload.model) {
-          currentModel = payload.model;
-          session.model = payload.model;
-        }
-        if (payload.effort) {
-          currentEffort = payload.effort;
-          session.effort = payload.effort;
-        }
-      } else if (row.type === 'event_msg' && payload.type === 'task_started' && Number.isFinite(ms)) {
-        turnSequence++;
-        currentTurn = {
-          id: `${session.id}:turn:${turnSequence}`,
-          sequence: turnSequence,
-          started_ms: ms,
-          started_at: row.timestamp || null
-        };
-        recordsByTurn.set(currentTurn.id, []);
-        setPendingModelStart(ms, 'task_started');
-      } else if (row.type === 'event_msg' && payload.type === 'task_complete' && Number.isFinite(ms)) {
-        if (currentTurn) {
-          const turnRecords = recordsByTurn.get(currentTurn.id) || [];
-          for (const record of turnRecords) {
-            record.turn_completed_at = row.timestamp || null;
-            record.turn_completed_ms = ms;
-            record.turn_duration_ms_estimate = Math.max(0, ms - currentTurn.started_ms);
-          }
-          currentTurn = null;
-        }
-      } else if (row.type === 'event_msg' && payload.type === 'user_message' && Number.isFinite(ms)) {
-        setPendingModelStart(ms, 'user_message');
-      } else if (
-        row.type === 'event_msg' &&
-        Number.isFinite(ms) &&
-        (payload.type?.endsWith('_tool_call_end') ||
-          payload.type?.endsWith('_command_end') ||
-          payload.type?.endsWith('_apply_end') ||
-          payload.type === 'function_call_output')
-      ) {
-        setPendingModelStart(ms, payload.type);
-      } else if (row.type === 'response_item' && Number.isFinite(ms)) {
-        if (payload.type === 'function_call_output') {
-          setPendingModelStart(ms, 'function_call_output');
-        } else if (!(payload.type === 'message' && payload.role === 'user')) {
-          if (!activeModelCall) {
-            const requestStartMs = pendingModelStartMs ?? currentTurn?.started_ms ?? ms;
-            activeModelCall = {
-              request_start_ms: requestStartMs,
-              request_start_basis: pendingModelStartBasis || (currentTurn ? 'task_started' : 'first_response_item'),
-              first_output_ms: ms,
-              first_output_type: payload.type || row.type,
-              response_item_count: 0
-            };
-          }
-          activeModelCall.response_item_count++;
-        }
-      } else if (row.type === 'event_msg' && payload.type === 'token_count') {
-        tokenEvents++;
-        session.token_events++;
-        if (!Number.isFinite(ms)) continue;
-        const resetModelCall = () => {
-          const keepPendingForNext =
-            pendingModelStartMs != null && activeModelCall?.first_output_ms != null && pendingModelStartMs > activeModelCall.first_output_ms;
-          if (!keepPendingForNext) setPendingModelStart(ms, 'previous_token_count');
-          activeModelCall = null;
-        };
-        if (ms < options.start || ms > options.end) {
-          resetModelCall();
-          continue;
-        }
-        const usage = normalizeUsage(payload.info?.last_token_usage || {});
-        if (usage.total_tokens <= 0) {
-          resetModelCall();
-          continue;
-        }
-        if (isSystemUsageWithoutBreakdown(usage)) {
-          excludedSystemEvents++;
-          resetModelCall();
-          continue;
-        }
-        const totalUsage = normalizeUsage(payload.info?.total_token_usage || {});
-        const totalUsageSnapshot = totalUsage.total_tokens > 0 ? totalUsage : null;
-        const key = dedupeKey(session.id, usage, totalUsageSnapshot);
-        if (options.dedupe && seen.has(key)) {
-          duplicateEvents++;
-          continue;
-        }
-        seen.add(key);
-        ordinal++;
-        const requestStartMs = activeModelCall?.request_start_ms ?? pendingModelStartMs ?? currentTurn?.started_ms ?? null;
-        const firstOutputMs = activeModelCall?.first_output_ms ?? null;
-        const responseItemCount = activeModelCall?.response_item_count ?? 0;
-        let requestDurationMs = requestStartMs == null ? null : Math.max(0, ms - requestStartMs);
-        let firstOutputDurationMs =
-          requestStartMs == null || firstOutputMs == null ? null : Math.max(0, firstOutputMs - requestStartMs);
-        let requestDurationBasis =
-          requestStartMs == null ? null : `${activeModelCall?.request_start_basis || pendingModelStartBasis || 'unknown'}_to_token_count`;
-        let firstOutputBasis =
-          firstOutputDurationMs == null
-            ? null
-            : `${activeModelCall?.request_start_basis || pendingModelStartBasis || 'unknown'}_to_first_response_item`;
-        if (requestDurationMs != null && requestDurationMs > MAX_REQUEST_DURATION_ESTIMATE_MS) {
-          requestDurationMs = null;
-          firstOutputDurationMs = null;
-          requestDurationBasis = 'stale_local_boundary_excluded';
-          firstOutputBasis = null;
-        }
-        let streamObserved = null;
-        let streamObservedBasis = 'no_response_item_before_token_count';
-        if (responseItemCount > 1) {
-          streamObserved = true;
-          streamObservedBasis = 'multiple_response_items_before_token_count';
-        } else if (responseItemCount === 1) {
-          streamObserved = false;
-          streamObservedBasis = 'single_response_item_before_token_count';
-        }
-        const record = {
-          record_id: `session-token-${session.id}-${ms}-${ordinal}`,
-          timestamp: row.timestamp || null,
-          local_time: new Date(ms).toLocaleString(),
-          ms,
-          session_id: session.id,
-          session_file: file,
-          cwd: session.cwd,
-          source: session.source,
-          thread_source: session.thread_source,
-          originator: session.originator,
-          model_provider: session.model_provider,
-          cli_version: session.cli_version,
-          model: currentModel || session.model || '',
-          effort: currentEffort || session.effort || '',
-          status: 'recorded',
-          usage,
-          total_usage_snapshot: totalUsageSnapshot,
-          model_context_window: payload.info?.model_context_window ?? null,
-          turn_id: currentTurn?.id || null,
-          turn_sequence: currentTurn?.sequence ?? null,
-          turn_started_at: currentTurn?.started_at || null,
-          turn_started_ms: currentTurn?.started_ms ?? null,
-          turn_elapsed_ms_estimate: currentTurn ? Math.max(0, ms - currentTurn.started_ms) : null,
-          request_started_ms_estimate: requestStartMs,
-          request_duration_ms_estimate: requestDurationMs,
-          request_duration_basis: requestDurationBasis,
-          first_output_ms_estimate: firstOutputDurationMs,
-          first_output_event_ms: firstOutputMs,
-          first_output_event_type: activeModelCall?.first_output_type || null,
-          first_output_basis: firstOutputBasis,
-          response_item_count: responseItemCount,
-          stream_observed: streamObserved,
-          stream_observed_basis: streamObservedBasis,
-          turn_completed_at: null,
-          turn_completed_ms: null,
-          turn_duration_ms_estimate: null,
-          duration_basis: requestDurationBasis,
-          duplicate_key: key
-        };
-        records.push(record);
-        session.records++;
-        if (currentTurn) {
-          const turnRecords = recordsByTurn.get(currentTurn.id) || [];
-          turnRecords.push(record);
-          recordsByTurn.set(currentTurn.id, turnRecords);
-        }
-        resetModelCall();
-      }
-    }
-    sessions.set(session.id, session);
   }
-
-  records.sort((a, b) => b.ms - a.ms);
-  return {
-    records,
-    sessions: [...sessions.values()].sort((a, b) => b.end_ms - a.end_ms),
-    diagnostics: {
-      codex_home: options.codexHome,
-      sessions_dir: sessionsDir,
-      archived_sessions_dir: archivedSessionsDir,
-      session_files: files.length,
-      scanned_files: scannedFiles,
-      scanned_lines: scannedLines,
-      malformed_lines: malformedLines,
-      token_count_events: tokenEvents,
-      excluded_system_token_count_events: excludedSystemEvents,
-      duplicate_events: duplicateEvents,
-      dedupe_strategy: options.dedupe
-        ? 'session_id + last_token_usage_tuple + total_token_usage_snapshot_tuple'
-        : 'disabled',
-      dedupe: options.dedupe
-    }
-  };
+  records.sort((a,b)=>b.ms-a.ms || b.record_id.localeCompare(a.record_id));
+  return {records,sessions:[...sessions.values()],diagnostics:{codex_home:options.codexHome,sessions_dir:dirs[0],archived_sessions_dir:dirs[1],
+    session_files:files.length,scanned_files:scannedFiles,scanned_lines:scannedLines,malformed_lines:malformedLines,token_count_events:tokenEvents,
+    excluded_system_token_count_events:excludedSystemEvents,duplicate_events:duplicateEvents,dedupe_strategy:'response_id_then_legacy_counter_or_event',dedupe:options.dedupe}};
 }
 
 function bucketStart(ms, width) {
@@ -559,10 +213,10 @@ function summarize(scan, options) {
       end: new Date(options.end).toISOString()
     },
     data_quality: {
-      primary_records: 'codex_session_token_count_events',
+      primary_records: 'response_usage_with_legacy_fallback',
       token_usage: 'codex_session_last_token_usage',
       context_fields: 'codex_session_meta_and_turn_context',
-      duration_ms_estimate: 'local_observed_model_request_start_to_token_count',
+      duration_ms_estimate: 'local_model_output_boundaries_excluding_tool_wait',
       first_output_ms_estimate: 'local_observed_model_request_start_to_first_response_item',
       stream_observed: 'local_response_item_count_before_token_count_not_official_stream_flag',
       turn_duration_ms_estimate: 'local_session_task_started_to_task_complete',

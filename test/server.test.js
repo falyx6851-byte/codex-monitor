@@ -6,7 +6,11 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
-const { estimateCost, extractServiceTier, parseSessionFile } = require('../server');
+const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-pricing-test-'));
+process.env.CODEX_HOME = path.join(testRoot,'home');
+process.env.CODEX_TOKEN_MONITOR_DATA_DIR = path.join(testRoot,'data');
+const { estimateCost, extractServiceTier, parseSessionFile, db } = require('../server');
+test.after(()=>{db.close();fs.rmSync(testRoot,{recursive:true,force:true});});
 
 test('extracts the current thread_settings service tier path', () => {
   assert.deepEqual(

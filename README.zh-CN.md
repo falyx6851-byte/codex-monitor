@@ -145,11 +145,23 @@ Windows 包装命令：
 | `--format table/json/csv` | 输出格式 |
 | `--bucket hour/day/week/none` | 汇总粒度 |
 | `--limit <n>` / `--page <n>` / `--page-size <n>` | 明细分页 |
-| `--no-dedupe` | 保留重复 `token_count` 事件 |
+| `--no-dedupe` | 保留不同文件中的相同请求副本；UI 镜像计数仍排除 |
 | `--redact-paths` | 导出前隐藏本地 cwd / session 文件路径 |
 | `--out <file>` | 写入文件 |
 
 ## 数据源口径
+
+### v0.5.0 统计与查询规则
+
+- 固定第一条会话元信息作为文件身份；跳过子代理继承历史，按响应 ID 去重。旧日志回退到累计快照或事件时间去重。
+- 主记录优先使用 `token_usage_record.payload.usage`；兼容 `event_msg/token_count`，两者不会重复计数。看板与命令行报表共用解析器。
+- 响应时间取响应用量记录或最后模型输出的时间，耗时不包含后续工具等待；缺少边界时显示未知。
+- 今日、昨天、7 天、30 天会在查询时重算。昨天是上一自然日 00:00 到今天 00:00，结束时间不包含在范围内。
+- 筛选、分页直接查询索引；手动刷新和每 120 秒刷新触发后台扫描，完成后页面自动取得结果。
+- 导出全部 JSON 覆盖所选时间范围，汇总与明细来自同一数据库快照。未知费率显示未计价。
+- 数据库保存当前费率的派生列，数值汇总由 SQLite 执行，明细按索引分页；修改费率后重启并刷新索引。
+
+
 
 从 v0.4.0 起，同时扫描当前 `CODEX_HOME` 下的 `sessions/` 与 `archived_sessions/`。按逻辑会话合并两处文件并去重，归档、恢复归档及重复刷新不会重复计数；仍缺少原始文件的历史入库记录予以保留。文件解析失败时保留原数据，下次刷新重试。大型日志逐行读取，首次升级会重新索引现有文件。 日志索引在后台进程执行，页面先显示已入库数据并提示更新状态；SQLite 使用 WAL，避免后台写入阻塞查询。
 
@@ -162,7 +174,7 @@ Windows 包装命令：
 ~/.codex/archived_sessions/*.jsonl
 ```
 
-主请求记录来自：
+旧格式兼容记录来自（新格式优先级见上）：
 
 ```text
 row.type = "event_msg"
@@ -180,12 +192,12 @@ row.payload.info.last_token_usage
 | Reasoning token | `last_token_usage.reasoning_output_tokens` | 输出 token 子集，不额外加总 |
 | 总 token | `last_token_usage.total_tokens` | 请求级主加总字段 |
 | 模型 | 最近的 `turn_context.model` | 本地 session 上下文 |
-| 时间戳 | `token_count.timestamp` | 本地 session 事件时间 |
+| 时间戳 | 响应用量事件 / 最后模型输出时间 | 本地 session 事件时间 |
 | 状态 | 正常请求级 `token_count`、明确的 `event_msg/error` | 只显示成功 / 失败 |
 | 错误原因 | `event_msg/error.payload.message` | 没有明确原因时不编造 |
 | 费用估算 | `pricing.json` + token usage | 本地估算，不是官方账单 |
 | 首输出估算 | 本地边界到首个 `response_item` | 不是官方 TTFT |
-| 响应耗时估算 | 本地边界到 `token_count` | 不是服务端耗时 |
+| 响应耗时估算 | 本地边界到模型输出完成 | 不是服务端耗时 |
 
 已排除数据源：
 
