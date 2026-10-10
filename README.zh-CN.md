@@ -23,7 +23,7 @@ http://127.0.0.1:4127
 - 顶部监控卡片：请求数、总 token、缓存命中率、输出 token、估算金额、平均响应耗时。
 - 自定义时间范围与分页。
 - 本地 SQLite 派生统计库，可删除后自动重建。
-- 支持 GPT-6 Astra、GPT-5.6 Sol / Terra / Luna 的标准、Fast 和 Flex 费率，兼容 `gpt-5.6` 别名。
+- 支持 GPT-6.1 Sol、GPT-6 Astra / Sol / Luna、GPT-5.6 Sol / Terra / Luna 的标准、Fast 和 Flex 费率，兼容 `gpt-5.6` 别名；GPT-6.1 Sol 和 GPT-6 Astra 另支持 Ultrafast 费率。
 - 独立 CLI 统计脚本，可导出 table / JSON / CSV。
 
 ## 环境要求
@@ -228,7 +228,7 @@ row.payload.info.last_token_usage
 
 服务档位缺失或为 `auto` 的请求仍按标准价提供参考估算，但标记为“档位未知，按标准价估算”；汇总显示这类记录数，明细提示实际费用可能不同。这类金额不视为完整计价，也不保证是费用下限。
 
-费用来自 `pricing.json` 的本地估算。GPT-6 Astra / GPT-5.6 的完整公式是：
+费用来自 `pricing.json` 的本地估算。GPT-6.1 / GPT-6 / GPT-5.6 的完整公式是：
 
 ```text
 普通输入 token * input rate
@@ -241,24 +241,29 @@ row.payload.info.last_token_usage
 
 - `reasoning_output_tokens` 已包含在输出 token 中，不重复加总。
 - `cached_input_tokens` 已包含在输入 token 中，不重复加总。
-- GPT-6 Astra / GPT-5.6 的缓存写入按对应服务档位的官方 `cache write` 费率计费。若 session 没有提供 `cache_write_tokens`，金额标记为下限。
-- `thread_settings_applied.thread_settings.service_tier=priority/fast` 按 Fast / Priority 官方费率；`default/standard` 按标准费率。档位会沿用到后续的请求级 `token_count`。
-- GPT-6 Astra / GPT-5.6 在标准、Fast 和 Flex 档位超过 `272K` 输入 token 时，整条请求切换对应的长上下文费率。未配置费率的模型或服务档位保持未计价，不回退为标准价。
+- GPT-6.1 / GPT-6 / GPT-5.6 的缓存写入按对应服务档位的官方 `cache write` 费率计费。若 session 没有提供 `cache_write_tokens` 且服务档位已知，金额标记为下限。
+- `thread_settings_applied.thread_settings.service_tier=priority/fast` 按 Fast / Priority 官方费率；`default/standard` 按标准费率；`ultrafast` 使用单独配置的费率。档位会沿用到后续的请求级用量记录。
+- GPT-6.1 / GPT-6 / GPT-5.6 在标准、Fast 和 Flex 档位超过 `272K` 输入 token 时，整条请求切换对应的长上下文费率；GPT-6.1 Sol 和 GPT-6 Astra 的 Ultrafast 也支持长上下文费率。未配置费率的模型或服务档位保持未计价，不回退为标准价。
 - 只有总 token、没有输入/输出拆分的异常记录不计入已计价记录。
-- 这不是 OpenAI 官方账单，也不是 billing API 返回值。
+- 这是按 API token 单价计算的参考金额，不是 OpenAI 官方账单、ChatGPT 订阅扣款、积分用量或额度消耗。
 
-费率核对日期：**2026-09-07**。模型 ID `gpt-6-astra` 使用 Astra 费率，`gpt-5.6` 按 Sol 费率解析；兼容大小写及 `(xhigh)`、`-max` 等已知推理强度后缀，保留原始模型名称用于展示。未知 GPT-6 变体不会自动套用 Astra 价格。
+GPT-6.1 / GPT-6 / GPT-5.6 当前费率核对日期：**2026-10-10**。`gpt-6.1-sol`、`gpt-6-astra`、`gpt-6-sol`、`gpt-6-luna` 各使用独立费率，`gpt-5.6` 按 GPT-5.6 Sol 解析；兼容大小写及 `(xhigh)`、`-max` 等已知推理强度后缀，保留原始模型名称用于展示。未知变体和未经确认的别名保持未计价。
 
 所有历史请求也按当前价格快照重新估算，不还原历史账单价格。GPT-5.6 Sol 当前为促销价格，官方说明至少持续至 2026-11-21，届时需要重新核对。估算不包含区域处理附加费及非 token 工具费用。
 
 | 模型 | 标准输入 | 缓存读取 | 缓存写入 | 输出 |
 | --- | ---: | ---: | ---: | ---: |
 | GPT-6 Astra | $10 | $1 | $12.5 | $50 |
+| GPT-6.1 Sol | $2 | $0.10 | $2.5 | $10 |
+| GPT-6 Sol | $2 | $0.20 | $2.5 | $10 |
+| GPT-6 Luna | $0.10 | $0.01 | $0.125 | $0.50 |
 | GPT-5.6 Sol | $4 | $0.4 | $5 | $20 |
 | GPT-5.6 Terra | $2 | $0.2 | $2.5 | $12 |
 | GPT-5.6 Luna | $0.2 | $0.02 | $0.25 | $1.2 |
 
-单位：美元 / 百万 token，表内为短上下文标准价。上述模型的 Fast 为对应标准价 2 倍，Flex 为 0.5 倍；长上下文输入及缓存费率为短上下文 2 倍，输出为 1.5 倍。来源：[OpenAI 官方价格](https://developers.openai.com/api/docs/pricing)、[GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra)。
+单位：美元 / 百万 token，表内为短上下文标准价。上述模型的 Fast 为对应标准价 2 倍，Flex 为 0.5 倍；仅 GPT-6.1 Sol 和 GPT-6 Astra 配置 Ultrafast，费率为标准价 6 倍。长上下文输入及缓存费率为短上下文 2 倍，输出为 1.5 倍。GPT-6.1 Sol 缓存读取价为普通输入价的 5%，GPT-6 Sol 为 10%。来源：[OpenAI 官方价格](https://developers.openai.com/api/docs/pricing)、[GPT-6.1 Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol)、[GPT-6 Astra](https://developers.openai.com/api/docs/models/gpt-6-astra)。
+
+更新后重启监控并刷新页面，已有索引记录会按新价格快照重新估算；即使原始 session 文件已不存在，也可使用已保存的 token 数重新计价。
 
 ## 本地 API
 

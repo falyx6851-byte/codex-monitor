@@ -245,14 +245,14 @@ function statusPill(record) {
 function serviceTierPill(record) {
   const tier = String(record.service_tier || '').trim().toLowerCase();
   if (!tier) return '<span class="muted">未知</span>';
-  const label = { fast: 'Fast', priority: 'Fast', default: '标准', standard: '标准', flex: 'Flex' }[tier] || tier;
-  const klass = tier === 'fast' || tier === 'priority' ? 'warn' : 'muted-pill';
+  const label = serviceTierLabel(tier);
+  const klass = ['fast', 'priority', 'ultrafast'].includes(tier) ? 'warn' : 'muted-pill';
   return `<span class="pill ${klass}" title="请求级 service_tier=${escapeHtml(tier)}">${escapeHtml(label)}</span>`;
 }
 
 function serviceTierLabel(value) {
   const tier = String(value || '').trim().toLowerCase();
-  return { fast: 'Fast', priority: 'Fast', default: '标准', standard: '标准', flex: 'Flex' }[tier] || tier || '未知';
+  return { fast: 'Fast', priority: 'Fast', ultrafast: 'Ultrafast', default: '标准', standard: '标准', flex: 'Flex' }[tier] || tier || '未知';
 }
 
 function displayRecordId(recordId) {

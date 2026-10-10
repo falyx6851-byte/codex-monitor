@@ -75,7 +75,7 @@ for (const [tier, amount, label] of [
     assert.equal(cost.complete, true);
     assert.ok(Math.abs(cost.amount_usd - amount) < 1e-12);
     assert.equal(cost.input_tokens_billed_at_input_rate, 40_000);
-    assert.equal(cost.updated_at, '2026-09-07');
+    assert.equal(cost.updated_at, '2026-10-10');
   });
 }
 
@@ -124,7 +124,7 @@ test('known effort decorations and case resolve without guessing unknown GPT-6 v
 
 test('unsupported service tiers and legacy Fast long context remain unpriced', () => {
   for (const [model, tier, input, reason] of [
-    ['gpt-6-astra', 'ultrafast', 100_000, 'missing_ultrafast_pricing'],
+    ['gpt-5.6-sol', 'ultrafast', 100_000, 'missing_ultrafast_pricing'],
     ['gpt-6-astra', 'input_per_1m', 100_000, 'missing_input_per_1m_pricing'],
     ['gpt-5.3-codex', 'flex', 100_000, 'missing_flex_pricing'],
     ['gpt-5.5', 'fast', 300_000, 'priority_long_context_pricing_unavailable']

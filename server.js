@@ -90,7 +90,7 @@ function estimateCost(usage, model, serviceTier) {
   let rates = resolved.pricing;
   let rateTier = 'standard';
   if (selectedServiceTier !== 'standard') {
-    const tierRates = ['priority', 'flex'].includes(selectedServiceTier)
+    const tierRates = ['priority', 'flex', 'ultrafast'].includes(selectedServiceTier)
       ? resolved.pricing[selectedServiceTier] : null;
     if (!tierRates || (overLongContextThreshold && !tierRates.long_context)) {
       return {
